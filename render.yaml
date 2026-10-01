@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: social-risk-coding
+    runtime: node
+    plan: 0.5c-512mb
+    buildCommand: node --test tests/*.test.mjs
+    startCommand: node server.mjs
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: DB_PATH
+        value: /var/data/coding.sqlite
+    disk:
+      name: coding-data
+      mountPath: /var/data
+      sizeGB: 1

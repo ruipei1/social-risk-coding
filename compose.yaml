@@ -1,0 +1,20 @@
+services:
+  coding:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4317:4317"
+    environment:
+      APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN to your HTTPS site origin}
+    volumes:
+      - coding_data:/app/data
+      - ./input:/input:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4317/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  coding_data:

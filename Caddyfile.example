@@ -1,0 +1,4 @@
+# Replace the domain with yours. Caddy runs on the host, outside Docker.
+coding.your-lab.edu {
+    reverse_proxy 127.0.0.1:4317
+}

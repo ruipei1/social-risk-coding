@@ -1,0 +1,13 @@
+{
+  "name": "social-risk-coding-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.4.0 <25" },
+  "scripts": {
+    "start": "node server.mjs",
+    "preview": "node server.mjs --preview",
+    "import": "node manage.mjs import",
+    "test": "node --test tests/*.test.mjs"
+  }
+}
