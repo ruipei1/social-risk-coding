@@ -94,3 +94,25 @@ test('simplified coding preserves hidden legacy fields and exports old and new a
   assert.equal(row.situation_note,old.dimensions.situation.note);
  } finally {s.close();}
 });
+
+test('comparison is admin-only and distinguishes disagreements from missing readings', async () => {
+ const s=setup(); try {
+  const a=await s.login('coder-a','coder-a-test-password'), b=await s.login('coder-b','coder-b-test-password'), admin=await s.login('admin','administrator-test-password');
+  assert.equal((await s.request('/api/comparison')).status,401);
+  assert.equal((await s.request('/api/comparison',a)).status,403);
+  const c=await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'Taking a class',family:'Learning'}});
+  const one=annotation();one.status='complete';one.payload.dimensions.behavior={codes:[c.data.id]};
+  const id='test-record:general_self_approach';
+  assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:one})).status,200);
+  let result=(await s.request('/api/comparison',admin)).data;
+  assert.equal(result.rows[0].result,'insufficient');assert.equal(result.rows[0].missing,2);
+  const two=annotation();two.status='complete';
+  assert.equal((await s.request('/api/annotation/'+id,{...b,method:'PUT',body:two})).status,200);
+  result=(await s.request('/api/comparison?filter=disagreement',admin)).data;
+  assert.equal(result.total,1);assert.equal(result.rows[0].fields.behavior.differs,true);
+  assert.equal(result.rows[0].missing,1);assert.deepEqual(result.rows[0].fields.behavior.differingIds,[c.data.id]);
+  assert.equal(result.rows[0].readings.find(r=>r.username==='coder-a').dimensions.behavior[0].name,'Taking a class');
+  assert.equal((await s.request('/api/comparison?q=doesnotexist',admin)).data.total,0);
+  assert.equal((await s.request('/api/comparison?offset=-1',admin)).status,400);
+ } finally {s.close();}
+});
