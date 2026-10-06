@@ -22,7 +22,7 @@ async function bootstrap() {
   $('#login').hidden = !!data.user; $('#app').hidden = !data.user;
   $('#preview-login').hidden = !data.preview; $('#login-form').hidden = data.preview;
   if (!data.user) return;
-  $('#user-name').textContent = data.user.name; $('#team-nav').hidden = data.user.role !== 'admin';
+  $('#user-name').textContent = data.user.name; $('#team-nav').hidden = data.user.role !== 'admin'; $('#comparison-nav').hidden = data.user.role !== 'admin';
   $('#mode-label').textContent = data.preview ? 'Local preview · saved on this computer' : 'Private research workspace';
   $('#codebook-dimension').innerHTML = '<option value="">Every dimension</option>' + state.dimensions.map(d => `<option value="${d.id}">${esc(d.label)}</option>`).join('');
   await loadCodes(); await loadStats(); await loadQueue();
@@ -217,9 +217,9 @@ function openCode(dimension, id = null) {
 }
 async function changeView(view) {
   await flush(); state.view = view;
-  for (const v of ['reading','codebook','team']) $('#' + v + '-view').hidden = v !== view;
+  for (const v of ['reading','codebook','team','comparison']) $('#' + v + '-view').hidden = v !== view;
   $$('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
-  if (view === 'codebook') await loadCodes(); if (view === 'team') await loadTeam();
+  if (view === 'codebook') await loadCodes(); if (view === 'team') await loadTeam(); if (view === 'comparison') await loadComparison();
 }
 async function loadTeam() {
   const users = await api('/api/team');
@@ -293,3 +293,33 @@ $('#user-form').onsubmit = async e => { e.preventDefault(); const button = $('bu
 window.addEventListener('beforeunload', e => { if (state.dirty || state.saving) { e.preventDefault(); e.returnValue = ''; } });
 document.addEventListener('keydown', e => { if (e.altKey && ['ArrowLeft','ArrowRight'].includes(e.key) && state.view === 'reading' && !$$('dialog[open]').length) { e.preventDefault(); attempt(() => nextResponse(e.key === 'ArrowRight' ? 1 : -1)); } });
 bootstrap().catch(e => { $('#login').hidden = false; $('#login-error').textContent = e.message; });
+
+let comparisonOffset = 0, comparisonRequest = 0;
+async function loadComparison() {
+  const request = ++comparisonRequest;
+  $('#comparison-results').innerHTML = '<p class="empty">Loading comparison…</p>';
+  const params = new URLSearchParams({offset:comparisonOffset,scope:$('#comparison-scope').value,filter:$('#comparison-filter').value,q:$('#comparison-search').value});
+  try {
+    const data = await api('/api/comparison?' + params);
+    if (request !== comparisonRequest) return;
+    if (data.total && comparisonOffset >= data.total) { comparisonOffset = 0; return loadComparison(); }
+    $('#comparison-summary').textContent = `${data.summary.total} responses with saved coding · ${data.summary.disagreement} disagreements · ${data.summary.consistent} consistent · ${data.summary.insufficient} with fewer than two compared readings`;
+    const quality = {substantive:'Substantive response',no_example:'No example recalled / not applicable',ambiguous:'Too ambiguous to interpret',off_topic:'Off topic',blank:'Blank response'};
+    $('#comparison-results').innerHTML = data.rows.map(item => {
+      const resultLabel = {disagreement:'Disagreement',consistent:'Consistent among compared coders',insufficient:'Not enough readings to compare'}[item.result];
+      const renderField = (id, title, content, compared) => `<div class="comparison-field ${compared && item.fields[id]?.differs ? 'differs' : ''}"><h3>${esc(title)}${compared && item.fields[id]?.differs ? ' · differs' : ''}</h3>${content}</div>`;
+      return `<article class="comparison-card"><header><div><strong>${esc(item.response.participant_label)}</strong><p>${esc(prompt(item.response.prompt)?.label || item.response.prompt)}</p></div><span class="comparison-badge ${item.result}">${resultLabel}</span></header><blockquote>${esc(item.response.text) || '<em>No response entered.</em>'}</blockquote><p class="comparison-coverage">${item.eligibleCoderIds.length} compared · ${item.missing} without saved coding · ${item.unfinished} unfinished${item.noLabels ? ' · All compared readings have empty label sets; review before treating this as substantive agreement.' : ''}${item.observationsDiffer ? ' · Observations differ; read below.' : ''}${$('#comparison-scope').value === 'all' ? ' · Provisional comparison includes unfinished readings.' : ''}</p><div class="coder-columns">${item.readings.map(r => {
+        const compared = item.eligibleCoderIds.includes(r.coder_id);
+        return `<section class="coder-reading"><h2>${esc(r.username)}</h2><p class="muted small">${esc(r.name)}${r.active ? '' : ' · inactive account'} · ${esc(labels[r.status])}${r.saved && !compared ? ' · not compared' : ''}</p>${!r.saved ? '<p class="empty">No saved reading</p>' : state.dimensions.map(d => renderField(d.id,d.label,r.dimensions[d.id].length ? '<div class="comparison-chips">'+r.dimensions[d.id].map(c => `<span class="comparison-chip ${compared && item.fields[d.id].differingIds.includes(c.id) ? 'different-code' : ''}">${esc(c.name)}${c.status === 'retired' ? ' (retired)' : ''}</span>`).join('')+'</div>' : '<p class="muted">No labels selected</p>',compared)).join('') + renderField('response_quality','Response type',`<p>${esc(quality[r.response_quality] || r.response_quality)}</p>`,compared) + `<div class="comparison-field"><h3>Observations</h3><p class="comparison-memo">${esc(r.observations) || '<span class="muted">No observations saved</span>'}</p></div>`}</section>`;
+      }).join('')}</div></article>`;
+    }).join('') || '<p class="empty">No saved responses match these filters.</p>';
+    $('#comparison-page').textContent = data.total ? `${comparisonOffset+1}–${Math.min(comparisonOffset+20,data.total)} of ${data.total}` : '0 responses';
+    $('#comparison-prev').disabled = comparisonOffset === 0;
+    $('#comparison-next').disabled = comparisonOffset+20 >= data.total;
+  } catch (e) { if (request === comparisonRequest) { $('#comparison-results').textContent = 'Comparison could not load. Use Refresh comparison to retry.'; notice(e.message); } }
+}
+for (const id of ['comparison-filter','comparison-scope']) $('#'+id).addEventListener('change', () => { comparisonOffset=0; loadComparison(); });
+$('#comparison-search').addEventListener('change', () => { comparisonOffset=0; loadComparison(); });
+$('#comparison-refresh').onclick = () => loadComparison();
+$('#comparison-prev').onclick = () => { comparisonOffset=Math.max(0,comparisonOffset-20); loadComparison(); };
+$('#comparison-next').onclick = () => { comparisonOffset+=20; loadComparison(); };
