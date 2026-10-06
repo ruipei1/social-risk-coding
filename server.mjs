@@ -1,3 +1,4 @@
+import { comparisonData } from './comparison.mjs';
 import http from 'node:http';
 import { observationsText } from './public/memos.js';
 import { readFileSync } from 'node:fs';
@@ -172,6 +173,22 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
             db.prepare('INSERT INTO history(entity,entity_id,user_id,version,payload,created) VALUES (?,?,?,?,?,?)').run('code', String(savedId), user.id, version, JSON.stringify(input), timestamp());
           });
           return json({ id: savedId });
+        }
+        if (req.method === 'GET' && path === '/api/comparison') {
+          admin();
+          const scope = url.searchParams.get('scope') || 'complete';
+          check(['complete','all'].includes(scope), 'Invalid comparison scope.');
+          const filter = url.searchParams.get('filter') || 'all';
+          check(['all','disagreement','consistent','insufficient'].includes(filter), 'Invalid comparison filter.');
+          const offset = Number(url.searchParams.get('offset') || 0);
+          check(Number.isSafeInteger(offset) && offset >= 0, 'Invalid offset.');
+          const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+          const rows = comparisonData(db, {includeDrafts:scope === 'all'});
+          const summary = { total:rows.length, disagreement:0, consistent:0, insufficient:0 };
+          for (const row of rows) summary[row.result]++;
+          const selected = rows.filter(r => (filter === 'all' || r.result === filter) &&
+            (!q || [r.response.text,r.response.participant_label,r.response.prompt].some(s => s.toLowerCase().includes(q))));
+          return json({summary,total:selected.length,offset,limit:20,rows:selected.slice(offset,offset+20)});
         }
         if (req.method === 'GET' && path === '/api/team') {
           admin();

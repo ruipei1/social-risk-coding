@@ -1,6 +1,6 @@
 FROM node:24-bookworm-slim
 WORKDIR /app
-COPY --chown=node:node package.json model.mjs server.mjs manage.mjs starter-codebook.mjs ./
+COPY --chown=node:node package.json model.mjs comparison.mjs server.mjs manage.mjs starter-codebook.mjs ./
 COPY --chown=node:node public ./public
 RUN mkdir -p /app/data && chown node:node /app/data
 USER node
