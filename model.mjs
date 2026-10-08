@@ -5,6 +5,7 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypt
 
 export const DIMENSIONS = [
   ['behavior', 'Behavior', 'What action is being done, considered, or avoided? Choose specific behaviors; more than one can fit.'],
+  ['anticipated_interpersonal_consequence', 'Anticipated interpersonal consequence', 'What interpersonal outcome is expected or feared? Choose all that are supported by the response.'],
   ['who', 'Who is involved?', 'Optional. Choose the people or relationships stated in the response.'],
   ['setting', 'Setting', 'Optional. Where does it happen? Choose only settings supported by the text.']
 ].map(([id, label, help]) => ({ id, label, help }));

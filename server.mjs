@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { DIMENSIONS, ALL_DIM_IDS, PROMPTS, openDB, hash, timestamp, passwordMatches, passwordHash, addUser, transaction, csvExport } from './model.mjs';
+import { seedStarterCodebook } from './starter-codebook.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const failure = (status, message) => Object.assign(new Error(message), { status });
@@ -34,7 +35,10 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
   }
   function annotation(responseId, userId) {
     const saved = db.prepare('SELECT * FROM annotations WHERE response_id=? AND user_id=?').get(responseId, userId);
-    return saved ? { ...saved, payload: JSON.parse(saved.payload) } : { version: 0, status: 'unread', payload: { dimensions: {}, memos: {}, response_quality: 'substantive' } };
+    if (saved) return { ...saved, payload: JSON.parse(saved.payload) };
+    const unspecified = db.prepare("SELECT id FROM codes WHERE dimension='who' AND name='Unspecified' AND status!='retired'").get();
+    const dimensions = unspecified ? { who: { codes:[unspecified.id], note:'', quote:'', evidence:'unreviewed' } } : {};
+    return { version: 0, status: 'unread', payload: { dimensions, memos: {}, response_quality: 'substantive' } };
   }
   function validatePayload(payload, previous = {}) {
     check(payload && typeof payload === 'object', 'Missing annotation.');
@@ -279,6 +283,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const origin = process.env.APP_ORIGIN || (!preview && process.env.RENDER_EXTERNAL_URL) || `http://127.0.0.1:${port}`;
   if (process.env.NODE_ENV === 'production' && (preview || !origin.startsWith('https://'))) throw new Error('Production requires HTTPS APP_ORIGIN and no preview flag.');
   const { handler, db } = createApp({ preview, origin });
+  const seedAuthor = db.prepare("SELECT id FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1").get();
+  if (seedAuthor) {
+    const seeded = seedStarterCodebook(db, seedAuthor.id);
+    if (seeded.added || seeded.updated) console.log('Starter codebook synchronized:', seeded);
+  }
   const server = http.createServer({ requestTimeout: 30000, headersTimeout: 15000 }, handler);
   server.listen(port, host, () => console.log(`Social Risk Coding: ${origin}${preview ? ' (local preview)' : ''}`));
   for (const signal of ['SIGINT','SIGTERM']) process.on(signal, () => server.close(() => { db.close(); process.exit(0); }));
