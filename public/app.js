@@ -1,4 +1,5 @@
 import { observationsText } from './memos.js';
+import { addSelectedCode } from './selections.js';
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -243,7 +244,8 @@ document.addEventListener('change', e => {
   if (e.target.id === 'behavior-family') { updateBehaviorPicker(); return; }
   if (e.target.matches('#response-quality')) { edited(); const dim = e.target.closest('.dimension'); if (dim) $('.dim-indicator', dim).textContent = labels[e.target.value]; }
   if (e.target.matches('[data-pick-code]') && e.target.value) {
-    const dimension = e.target.dataset.pickCode, ids = [...selectedCodes(dimension), Number(e.target.value)];
+    const dimension = e.target.dataset.pickCode, picked = Number(e.target.value);
+    const ids = addSelectedCode(dimension, selectedCodes(dimension), picked, state.codes);
     $(`[data-dimension="${dimension}"] .dim-indicator`).textContent = ids.length + ' selected';
     $(`[data-chips="${dimension}"]`).innerHTML = renderChips(ids); e.target.innerHTML = codeOptions(dimension, ids); edited();
   }
