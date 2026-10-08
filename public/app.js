@@ -227,6 +227,11 @@ async function loadTeam() {
 }
 document.addEventListener('input', e => { if (e.target.matches('[data-memo]')) edited(); });
 document.addEventListener('change', e => {
+  if (e.target.matches('[data-comparison-coder]')) {
+    const checked = $$('[data-comparison-coder]:checked').map(input => Number(input.value));
+    if (!checked.length) { e.target.checked = true; return notice('Select at least one coder for comparison.'); }
+    comparisonCoderIds = checked; comparisonOffset = 0; notice(); attempt(() => loadComparison()); return;
+  }
   if (e.target.id === 'new-code-category') {
     const isNew = e.target.value === '__new__';
     $('#new-category-label').hidden = !isNew;
@@ -251,6 +256,7 @@ document.addEventListener('click', e => {
   else if (b.dataset.view) attempt(() => changeView(b.dataset.view));
   else if (b.dataset.propose) openCode(b.dataset.propose);
   else if (b.dataset.editCode) openCode(null, Number(b.dataset.editCode));
+  else if (b.dataset.editComparison) openComparisonEditor(b.dataset.responseId, Number(b.dataset.coderId));
   else if (b.dataset.removeCode) { const dimension = b.closest('[data-chips]').dataset.chips; b.closest('.chip').remove(); $(`[data-dimension="${dimension}"] .dim-indicator`).textContent = selectedCodes(dimension).length ? selectedCodes(dimension).length + ' selected' : ''; $(`[data-pick-code="${dimension}"]`).innerHTML = codeOptions(dimension, selectedCodes(dimension)); edited(); }
   else if (b.id === 'reading-help') $('#help-dialog').showModal();
   else if (b.id === 'next-response') attempt(() => nextResponse(1));
@@ -294,23 +300,27 @@ window.addEventListener('beforeunload', e => { if (state.dirty || state.saving) 
 document.addEventListener('keydown', e => { if (e.altKey && ['ArrowLeft','ArrowRight'].includes(e.key) && state.view === 'reading' && !$$('dialog[open]').length) { e.preventDefault(); attempt(() => nextResponse(e.key === 'ArrowRight' ? 1 : -1)); } });
 bootstrap().catch(e => { $('#login').hidden = false; $('#login-error').textContent = e.message; });
 
-let comparisonOffset = 0, comparisonRequest = 0;
+let comparisonOffset = 0, comparisonRequest = 0, comparisonRows = [], comparisonCoderIds = null;
 async function loadComparison() {
   const request = ++comparisonRequest;
   $('#comparison-results').innerHTML = '<p class="empty">Loading comparison…</p>';
   const params = new URLSearchParams({offset:comparisonOffset,scope:$('#comparison-scope').value,filter:$('#comparison-filter').value,q:$('#comparison-search').value});
+  if (comparisonCoderIds) params.set('coders', comparisonCoderIds.join(','));
   try {
     const data = await api('/api/comparison?' + params);
     if (request !== comparisonRequest) return;
     if (data.total && comparisonOffset >= data.total) { comparisonOffset = 0; return loadComparison(); }
-    $('#comparison-summary').textContent = `${data.summary.total} responses with saved coding · ${data.summary.disagreement} disagreements · ${data.summary.consistent} consistent · ${data.summary.insufficient} with fewer than two compared readings`;
+    comparisonRows = data.rows;
+    renderComparisonCoders(data.coders, data.selectedCoderIds);
+    const selectedLabel = `${data.selectedCoderIds.length} coder${data.selectedCoderIds.length === 1 ? '' : 's'} selected`;
+    $('#comparison-summary').textContent = `${selectedLabel} · ${data.summary.total} response${data.summary.total === 1 ? '' : 's'} with saved coding · ${data.summary.disagreement} disagreements · ${data.summary.consistent} consistent · ${data.summary.insufficient} with fewer than two compared readings`;
     const quality = {substantive:'Substantive response',no_example:'No example recalled / not applicable',ambiguous:'Too ambiguous to interpret',off_topic:'Off topic',blank:'Blank response'};
     $('#comparison-results').innerHTML = data.rows.map(item => {
       const resultLabel = {disagreement:'Disagreement',consistent:'Consistent among compared coders',insufficient:'Not enough readings to compare'}[item.result];
       const renderField = (id, title, content, compared) => `<div class="comparison-field ${compared && item.fields[id]?.differs ? 'differs' : ''}"><h3>${esc(title)}${compared && item.fields[id]?.differs ? ' · differs' : ''}</h3>${content}</div>`;
       return `<article class="comparison-card"><header><div><strong>${esc(item.response.participant_label)}</strong><p>${esc(prompt(item.response.prompt)?.label || item.response.prompt)}</p></div><span class="comparison-badge ${item.result}">${resultLabel}</span></header><blockquote>${esc(item.response.text) || '<em>No response entered.</em>'}</blockquote><p class="comparison-coverage">${item.eligibleCoderIds.length} compared · ${item.missing} without saved coding · ${item.unfinished} unfinished${item.noLabels ? ' · All compared readings have empty label sets; review before treating this as substantive agreement.' : ''}${item.observationsDiffer ? ' · Observations differ; read below.' : ''}${$('#comparison-scope').value === 'all' ? ' · Provisional comparison includes unfinished readings.' : ''}</p><div class="coder-columns">${item.readings.map(r => {
         const compared = item.eligibleCoderIds.includes(r.coder_id);
-        return `<section class="coder-reading"><h2>${esc(r.username)}</h2><p class="muted small">${esc(r.name)}${r.active ? '' : ' · inactive account'} · ${esc(labels[r.status])}${r.saved && !compared ? ' · not compared' : ''}</p>${!r.saved ? '<p class="empty">No saved reading</p>' : state.dimensions.map(d => renderField(d.id,d.label,r.dimensions[d.id].length ? '<div class="comparison-chips">'+r.dimensions[d.id].map(c => `<span class="comparison-chip ${compared && item.fields[d.id].differingIds.includes(c.id) ? 'different-code' : ''}">${esc(c.name)}${c.status === 'retired' ? ' (retired)' : ''}</span>`).join('')+'</div>' : '<p class="muted">No labels selected</p>',compared)).join('') + renderField('response_quality','Response type',`<p>${esc(quality[r.response_quality] || r.response_quality)}</p>`,compared) + `<div class="comparison-field"><h3>Observations</h3><p class="comparison-memo">${esc(r.observations) || '<span class="muted">No observations saved</span>'}</p></div>`}</section>`;
+        return `<section class="coder-reading"><div class="coder-reading-heading"><div><h2>${esc(r.username)}</h2><p class="muted small">${esc(r.name)}${r.active ? '' : ' · inactive account'} · ${esc(labels[r.status])}${r.saved && !compared ? ' · not compared' : ''}</p></div>${r.saved ? `<button class="quiet" data-edit-comparison="1" data-response-id="${esc(item.response.id)}" data-coder-id="${r.coder_id}">Edit reading</button>` : ''}</div>${!r.saved ? '<p class="empty">No saved reading</p>' : state.dimensions.map(d => renderField(d.id,d.label,r.dimensions[d.id].length ? '<div class="comparison-chips">'+r.dimensions[d.id].map(c => `<span class="comparison-chip ${compared && item.fields[d.id].differingIds.includes(c.id) ? 'different-code' : ''}">${esc(c.name)}${c.status === 'retired' ? ' (retired)' : ''}</span>`).join('')+'</div>' : '<p class="muted">No labels selected</p>',compared)).join('') + renderField('response_quality','Response type',`<p>${esc(quality[r.response_quality] || r.response_quality)}</p>`,compared) + `<div class="comparison-field"><h3>Observations</h3><p class="comparison-memo">${esc(r.observations) || '<span class="muted">No observations saved</span>'}</p></div>`}</section>`;
       }).join('')}</div></article>`;
     }).join('') || '<p class="empty">No saved responses match these filters.</p>';
     $('#comparison-page').textContent = data.total ? `${comparisonOffset+1}–${Math.min(comparisonOffset+20,data.total)} of ${data.total}` : '0 responses';
@@ -318,8 +328,40 @@ async function loadComparison() {
     $('#comparison-next').disabled = comparisonOffset+20 >= data.total;
   } catch (e) { if (request === comparisonRequest) { $('#comparison-results').textContent = 'Comparison could not load. Use Refresh comparison to retry.'; notice(e.message); } }
 }
+function renderComparisonCoders(coders, selectedCoderIds) {
+  const selected = new Set(selectedCoderIds);
+  $('#comparison-coders').innerHTML = coders.map(coder => `<label><input type="checkbox" data-comparison-coder value="${coder.id}" ${selected.has(coder.id) ? 'checked' : ''}><span><strong>${esc(coder.username)}</strong><small>${esc(coder.name)}${coder.active ? '' : ' · inactive'}</small></span></label>`).join('') || '<p class="muted">No coder accounts are available.</p>';
+  $('#comparison-coder-count').textContent = `${selected.size} of ${coders.length} coders included`;
+  $('#comparison-select-all').disabled = selected.size === coders.length;
+}
+function openComparisonEditor(responseId, coderId) {
+  const item = comparisonRows.find(row => row.response.id === responseId), reading = item?.readings.find(row => row.coder_id === coderId);
+  if (!item || !reading?.saved) return notice('That saved reading is no longer available. Refresh the comparison and try again.');
+  const form = $('#comparison-edit-form'); form.reset();
+  form.elements.response_id.value = responseId; form.elements.coder_id.value = coderId; form.elements.version.value = reading.version;
+  form.elements.status.value = reading.status; form.elements.response_quality.value = reading.response_quality || 'substantive'; form.elements.observations.value = reading.observations || '';
+  $('#comparison-edit-context').textContent = `${reading.name} (${reading.username}) · ${item.response.participant_label} · ${prompt(item.response.prompt)?.label || item.response.prompt}`;
+  $('#comparison-edit-dimensions').innerHTML = state.dimensions.map(d => {
+    const selected = new Set(reading.dimensions[d.id].map(c => c.id));
+    const codes = state.codes.filter(c => c.dimension === d.id && (c.status !== 'retired' || selected.has(c.id)));
+    return `<fieldset class="comparison-edit-dimension"><legend>${esc(d.label)}</legend><p class="muted small">${esc(d.help)}</p><div class="comparison-edit-codes">${codes.map(c => `<label><input type="checkbox" name="codes_${d.id}" value="${c.id}" ${selected.has(c.id) ? 'checked' : ''}><span>${esc(c.name)}${c.family ? `<small>${esc(c.family)}</small>` : ''}${c.status === 'retired' ? '<small>Retired</small>' : ''}</span></label>`).join('') || '<p class="muted">No codes are available for this dimension.</p>'}</div></fieldset>`;
+  }).join('');
+  $('.form-error', form).textContent = '';
+  $('#comparison-edit-dialog').showModal();
+}
+$('#comparison-edit-form').onsubmit = async e => {
+  e.preventDefault(); const form = e.target, button = $('button[type=submit]', form); button.disabled = true;
+  try {
+    const dimensions = Object.fromEntries(state.dimensions.map(d => [d.id, { codes:$$(`input[name="codes_${d.id}"]:checked`, form).map(input => Number(input.value)) }]));
+    const body = { version:Number(form.elements.version.value), status:form.elements.status.value, payload:{ response_quality:form.elements.response_quality.value, dimensions, memos:{ observations:form.elements.observations.value } } };
+    await api(`/api/comparison/annotation/${form.elements.coder_id.value}/${encodeURIComponent(form.elements.response_id.value)}`, { method:'PUT', body:JSON.stringify(body) });
+    $('#comparison-edit-dialog').close(); notice('Saved administrative correction. Comparison results have been recalculated.');
+    await loadComparison();
+  } catch (error) { $('.form-error', form).textContent = error.message; } finally { button.disabled = false; }
+};
 for (const id of ['comparison-filter','comparison-scope']) $('#'+id).addEventListener('change', () => { comparisonOffset=0; loadComparison(); });
 $('#comparison-search').addEventListener('change', () => { comparisonOffset=0; loadComparison(); });
 $('#comparison-refresh').onclick = () => loadComparison();
+$('#comparison-select-all').onclick = () => { comparisonCoderIds=null; comparisonOffset=0; notice(); loadComparison(); };
 $('#comparison-prev').onclick = () => { comparisonOffset=Math.max(0,comparisonOffset-20); loadComparison(); };
 $('#comparison-next').onclick = () => { comparisonOffset+=20; loadComparison(); };
