@@ -3,7 +3,7 @@ import { addSelectedCode } from './selections.js';
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
-const state = { user: null, csrf: '', dimensions: [], prompts: [], codes: [], queue: [], total: 0, offset: 0, detail: null, dirty: false, revision: 0, saving: null, saveTimer: null, blocked: false, view: 'reading' };
+const state = { user: null, csrf: '', dimensions: [], prompts: [], codes: [], batches: [], participants: [], batchId: null, queue: [], total: 0, offset: 0, detail: null, dirty: false, revision: 0, saving: null, saveTimer: null, blocked: false, view: 'reading' };
 const labels = { unread:'Unread', draft:'In progress', complete:'Complete', flagged:'For discussion', explicit:'Explicit', inferred:'Inferred', not_stated:'Not stated', unclear:'Unclear', mixed:'Mixed', unreviewed:'Not reviewed' };
 let queueRequest = 0;
 let responseRequest = 0;
@@ -18,18 +18,37 @@ async function attempt(fn) { try { await fn(); } catch (e) { notice(e.message); 
 function prompt(id) { return state.prompts.find(p => p.id === id); }
 function setSave(text, error = false) { $('#save-state').textContent = text; $('#save-state').classList.toggle('error', error); }
 function statusPill(status) { $('#annotation-status').textContent = labels[status]; $('#annotation-status').className = 'pill ' + status; }
+function selectedBatch() { return state.batches.find(batch => batch.id === state.batchId); }
 async function bootstrap() {
   const data = await api('/api/session'); Object.assign(state, { user:data.user, csrf:data.csrf, dimensions:data.dimensions, prompts:data.prompts });
   $('#login').hidden = !!data.user; $('#app').hidden = !data.user;
   $('#preview-login').hidden = !data.preview; $('#login-form').hidden = data.preview;
   if (!data.user) return;
-  $('#user-name').textContent = data.user.name; $('#team-nav').hidden = data.user.role !== 'admin'; $('#comparison-nav').hidden = data.user.role !== 'admin';
+  $('#user-name').textContent = data.user.name; $('#team-nav').hidden = data.user.role !== 'admin'; $('#comparison-nav').hidden = data.user.role !== 'admin'; $('#new-batch').hidden = data.user.role !== 'admin';
   $('#mode-label').textContent = data.preview ? 'Local preview · saved on this computer' : 'Private research workspace';
   $('#codebook-dimension').innerHTML = '<option value="">Every dimension</option>' + state.dimensions.map(d => `<option value="${d.id}">${esc(d.label)}</option>`).join('');
-  await loadCodes(); await loadStats(); await loadQueue();
+  await loadCodes(); await loadBatches(); await loadStats(); await loadQueue();
+}
+async function loadBatches(preferBatchId = null) {
+  const data = await api('/api/batches');
+  state.batches = data.batches; state.participants = data.participants;
+  const preferred = preferBatchId ?? state.batchId;
+  state.batchId = state.batches.some(batch => batch.id === preferred) ? preferred : data.active_batch_id;
+  $('#coding-batch').innerHTML = state.batches.map(batch => `<option value="${batch.id}">${esc(batch.name)}${batch.active ? ' · current' : ' · past'}</option>`).join('');
+  $('#coding-batch').value = String(state.batchId);
+  $('#participant-options').innerHTML = state.participants.map(participant => `<option value="${esc(participant.participant_label)}"></option>`).join('');
+  updateBatchMode();
+}
+function updateBatchMode() {
+  const batch = selectedBatch(), readonly = batch && !batch.active;
+  $('#batch-note').textContent = batch ? `${readonly ? 'Past batch · read only' : 'Current batch'}${batch.start_participant ? ` · starts at ${batch.start_participant}` : ''}` : '';
+  $('#coding-fields').classList.toggle('readonly-batch', !!readonly);
+  $$('#coding-fields select, #coding-fields button, #observations').forEach(control => control.disabled = !!readonly);
+  $$('.save-actions button').forEach(button => button.disabled = !state.detail || !!readonly);
+  if (readonly && state.detail) setSave('Past batch · read only');
 }
 async function loadStats() {
-  const stats = await api('/api/stats');
+  const stats = await api('/api/stats?batch=' + state.batchId);
   const complete = stats.mine.find(s => s.status === 'complete')?.n || 0;
   const percentage = stats.total ? Math.round(100 * complete / stats.total) : 0;
   $('#progress-text').textContent = `${complete.toLocaleString()} / ${stats.total.toLocaleString()} reviewed`;
@@ -37,7 +56,7 @@ async function loadStats() {
   $('#dataset-summary').textContent = `${stats.records.toLocaleString()} survey records · ${stats.nonblank.toLocaleString()} nonblank responses`;
 }
 function query() {
-  const params = new URLSearchParams({ offset:state.offset });
+  const params = new URLSearchParams({ offset:state.offset, batch:state.batchId });
   for (const name of ['domain','perspective','direction','status']) if ($('#filter-' + name).value) params.set(name, $('#filter-' + name).value);
   if ($('#search').value.trim()) params.set('q', $('#search').value.trim());
   if ($('#include-blanks').checked) params.set('blanks', '1');
@@ -53,7 +72,7 @@ async function loadQueue(selectFirst = true) {
     if (state.queue.length) await openResponse(state.queue[0].id);
     else { state.detail = null; $('#source-panel').innerHTML = '<div class="empty"><h3>No matching responses</h3><p>Try a different search or filter.</p></div>'; $('#coding-fields').innerHTML = ''; setSave('Choose a response to begin'); }
   }
-  $$('.save-actions button').forEach(b => b.disabled = !state.detail);
+  updateBatchMode();
 }
 function renderQueue() {
   $('#queue-total').textContent = state.total.toLocaleString();
@@ -65,10 +84,10 @@ async function openResponse(id) {
   if (state.detail?.response.id === id) return;
   const request = ++responseRequest;
   await flush();
-  const data = await api('/api/response/' + encodeURIComponent(id));
+  const data = await api('/api/response/' + encodeURIComponent(id) + '?batch=' + state.batchId);
   if (request !== responseRequest) return;
   state.detail = data; state.dirty = false; state.blocked = false; state.revision = 0;
-  renderResponse(); renderQueue(); notice();
+  renderResponse(); renderQueue(); updateBatchMode(); notice();
 }
 function renderResponse() {
   const { response:r, annotation:a, related } = state.detail, p = prompt(r.prompt), memos = a.payload.memos || {};
@@ -151,6 +170,7 @@ function edited() {
 async function flush(status) {
   clearTimeout(state.saveTimer);
   if (!state.detail) return;
+  if (!selectedBatch()?.active) { state.dirty = false; return; }
   if (state.blocked) throw new Error('Saving is paused after a conflict. Copy your notes before reloading this page.');
   if (status) { state.detail.annotation.status = status; state.dirty = true; state.revision++; }
   if (state.saving) { await state.saving; if (state.dirty) return flush(); return; }
@@ -159,7 +179,7 @@ async function flush(status) {
     while (state.dirty) {
       const rev = state.revision, current = state.detail, savedPayload = payload(); setSave('Saving…');
       try {
-        const result = await api('/api/annotation/' + encodeURIComponent(current.response.id), { method:'PUT', body:JSON.stringify({ version:current.annotation.version, status:current.annotation.status, payload:savedPayload }) });
+        const result = await api('/api/annotation/' + encodeURIComponent(current.response.id), { method:'PUT', body:JSON.stringify({ batch_id:state.batchId, version:current.annotation.version, status:current.annotation.status, payload:savedPayload }) });
         current.annotation.version = result.version; current.annotation.updated = result.updated; current.annotation.payload = savedPayload;
         if (state.revision === rev) state.dirty = false;
         const item = state.queue.find(r => r.id === current.response.id); if (item) item.status = current.annotation.status;
@@ -223,7 +243,7 @@ async function changeView(view) {
   if (view === 'codebook') await loadCodes(); if (view === 'team') await loadTeam(); if (view === 'comparison') await loadComparison();
 }
 async function loadTeam() {
-  const users = await api('/api/team');
+  const users = await api('/api/team?batch=' + state.batchId);
   $('#team-table').innerHTML = `<div class="table-wrap"><table><thead><tr><th>Researcher</th><th>Role</th><th>Started</th><th>Complete</th><th>For discussion</th></tr></thead><tbody>${users.map(u => `<tr><td><strong>${esc(u.name)}</strong><br><span class="muted">${esc(u.username)}${u.active ? '' : ' · disabled'}</span></td><td>${u.role === 'admin' ? 'Administrator' : 'Research assistant'}</td><td>${u.started}</td><td>${u.complete || 0}</td><td>${u.flagged || 0}</td></tr>`).join('')}</tbody></table></div>`;
 }
 document.addEventListener('input', e => { if (e.target.matches('[data-memo]')) edited(); });
@@ -271,6 +291,11 @@ $('#save-draft').onclick = () => attempt(() => flush('draft'));
 $('#flag-response').onclick = () => attempt(() => flush('flagged'));
 $('#complete-next').onclick = () => attempt(async () => { await flush('complete'); await nextResponse(); });
 $('#refresh').onclick = () => attempt(async () => { await flush(); await loadCodes(); await loadStats(); await loadQueue(); });
+$('#coding-batch').onchange = () => attempt(async () => {
+  const nextBatchId = Number($('#coding-batch').value);
+  await flush(); state.batchId = nextBatchId; state.offset = 0; state.detail = null; state.dirty = false; state.blocked = false;
+  updateBatchMode(); await loadStats(); await loadQueue();
+});
 for (const name of ['domain','perspective','direction','status']) $('#filter-' + name).onchange = () => attempt(async () => { await flush(); state.offset = 0; await loadQueue(); });
 $('#include-blanks').onchange = () => attempt(async () => { await flush(); state.offset = 0; await loadQueue(); });
 let searchTimer;
@@ -298,6 +323,17 @@ $('#code-form').onsubmit = async e => {
 };
 $('#new-user').onclick = () => { $('#user-form').reset(); $('.form-error', $('#user-form')).textContent = ''; $('#user-dialog').showModal(); };
 $('#user-form').onsubmit = async e => { e.preventDefault(); const button = $('button[type=submit]', e.target); button.disabled = true; try { await api('/api/users', { method:'POST', body:JSON.stringify(Object.fromEntries(new FormData(e.target))) }); e.target.reset(); $('#user-dialog').close(); await loadTeam(); } catch (error) { $('.form-error', e.target).textContent = error.message; } finally { button.disabled = false; } };
+$('#new-batch').onclick = () => { $('#batch-form').reset(); $('.form-error', $('#batch-form')).textContent = ''; $('#batch-dialog').showModal(); $('#batch-form').elements.name.focus(); };
+$('#batch-form').onsubmit = async e => {
+  e.preventDefault(); const form = e.target, button = $('button[type=submit]', form); button.disabled = true;
+  try {
+    await flush();
+    const created = await api('/api/batches', { method:'POST', body:JSON.stringify(Object.fromEntries(new FormData(form))) });
+    await loadBatches(created.id); state.offset = 0; state.detail = null; state.dirty = false; state.blocked = false;
+    form.reset(); $('#batch-dialog').close(); await loadStats(); await loadQueue();
+    notice(`Started “${created.name}”. Earlier annotations are preserved in the previous batch.`);
+  } catch (error) { $('.form-error', form).textContent = error.message; } finally { button.disabled = false; }
+};
 window.addEventListener('beforeunload', e => { if (state.dirty || state.saving) { e.preventDefault(); e.returnValue = ''; } });
 document.addEventListener('keydown', e => { if (e.altKey && ['ArrowLeft','ArrowRight'].includes(e.key) && state.view === 'reading' && !$$('dialog[open]').length) { e.preventDefault(); attempt(() => nextResponse(e.key === 'ArrowRight' ? 1 : -1)); } });
 bootstrap().catch(e => { $('#login').hidden = false; $('#login-error').textContent = e.message; });
@@ -306,7 +342,7 @@ let comparisonOffset = 0, comparisonRequest = 0, comparisonRows = [], comparison
 async function loadComparison() {
   const request = ++comparisonRequest;
   $('#comparison-results').innerHTML = '<p class="empty">Loading comparison…</p>';
-  const params = new URLSearchParams({offset:comparisonOffset,scope:$('#comparison-scope').value,filter:$('#comparison-filter').value,q:$('#comparison-search').value});
+  const params = new URLSearchParams({offset:comparisonOffset,batch:state.batchId,scope:$('#comparison-scope').value,filter:$('#comparison-filter').value,q:$('#comparison-search').value});
   if (comparisonCoderIds) params.set('coders', comparisonCoderIds.join(','));
   try {
     const data = await api('/api/comparison?' + params);
@@ -322,7 +358,7 @@ async function loadComparison() {
       const renderField = (id, title, content, compared) => `<div class="comparison-field ${compared && item.fields[id]?.differs ? 'differs' : ''}"><h3>${esc(title)}${compared && item.fields[id]?.differs ? ' · differs' : ''}</h3>${content}</div>`;
       return `<article class="comparison-card"><header><div><strong>${esc(item.response.participant_label)}</strong><p>${esc(prompt(item.response.prompt)?.label || item.response.prompt)}</p></div><span class="comparison-badge ${item.result}">${resultLabel}</span></header><blockquote>${esc(item.response.text) || '<em>No response entered.</em>'}</blockquote><p class="comparison-coverage">${item.eligibleCoderIds.length} compared · ${item.missing} without saved coding · ${item.unfinished} unfinished${item.noLabels ? ' · All compared readings have empty label sets; review before treating this as substantive agreement.' : ''}${item.observationsDiffer ? ' · Observations differ; read below.' : ''}${$('#comparison-scope').value === 'all' ? ' · Provisional comparison includes unfinished readings.' : ''}</p><div class="coder-columns">${item.readings.map(r => {
         const compared = item.eligibleCoderIds.includes(r.coder_id);
-        return `<section class="coder-reading"><div class="coder-reading-heading"><div><h2>${esc(r.username)}</h2><p class="muted small">${esc(r.name)}${r.active ? '' : ' · inactive account'} · ${esc(labels[r.status])}${r.saved && !compared ? ' · not compared' : ''}</p></div>${r.saved ? `<button class="quiet" data-edit-comparison="1" data-response-id="${esc(item.response.id)}" data-coder-id="${r.coder_id}">Edit reading</button>` : ''}</div>${!r.saved ? '<p class="empty">No saved reading</p>' : state.dimensions.map(d => renderField(d.id,d.label,r.dimensions[d.id].length ? '<div class="comparison-chips">'+r.dimensions[d.id].map(c => `<span class="comparison-chip ${compared && item.fields[d.id].differingIds.includes(c.id) ? 'different-code' : ''}">${esc(c.name)}${c.status === 'retired' ? ' (retired)' : ''}</span>`).join('')+'</div>' : '<p class="muted">No labels selected</p>',compared)).join('') + renderField('response_quality','Response type',`<p>${esc(quality[r.response_quality] || r.response_quality)}</p>`,compared) + `<div class="comparison-field"><h3>Observations</h3><p class="comparison-memo">${esc(r.observations) || '<span class="muted">No observations saved</span>'}</p></div>`}</section>`;
+        return `<section class="coder-reading"><div class="coder-reading-heading"><div><h2>${esc(r.username)}</h2><p class="muted small">${esc(r.name)}${r.active ? '' : ' · inactive account'} · ${esc(labels[r.status])}${r.saved && !compared ? ' · not compared' : ''}</p></div>${r.saved && selectedBatch()?.active ? `<button class="quiet" data-edit-comparison="1" data-response-id="${esc(item.response.id)}" data-coder-id="${r.coder_id}">Edit reading</button>` : ''}</div>${!r.saved ? '<p class="empty">No saved reading</p>' : state.dimensions.map(d => renderField(d.id,d.label,r.dimensions[d.id].length ? '<div class="comparison-chips">'+r.dimensions[d.id].map(c => `<span class="comparison-chip ${compared && item.fields[d.id].differingIds.includes(c.id) ? 'different-code' : ''}">${esc(c.name)}${c.status === 'retired' ? ' (retired)' : ''}</span>`).join('')+'</div>' : '<p class="muted">No labels selected</p>',compared)).join('') + renderField('response_quality','Response type',`<p>${esc(quality[r.response_quality] || r.response_quality)}</p>`,compared) + `<div class="comparison-field"><h3>Observations</h3><p class="comparison-memo">${esc(r.observations) || '<span class="muted">No observations saved</span>'}</p></div>`}</section>`;
       }).join('')}</div></article>`;
     }).join('') || '<p class="empty">No saved responses match these filters.</p>';
     $('#comparison-page').textContent = data.total ? `${comparisonOffset+1}–${Math.min(comparisonOffset+20,data.total)} of ${data.total}` : '0 responses';
@@ -355,7 +391,7 @@ $('#comparison-edit-form').onsubmit = async e => {
   e.preventDefault(); const form = e.target, button = $('button[type=submit]', form); button.disabled = true;
   try {
     const dimensions = Object.fromEntries(state.dimensions.map(d => [d.id, { codes:$$(`input[name="codes_${d.id}"]:checked`, form).map(input => Number(input.value)) }]));
-    const body = { version:Number(form.elements.version.value), status:form.elements.status.value, payload:{ response_quality:form.elements.response_quality.value, dimensions, memos:{ observations:form.elements.observations.value } } };
+    const body = { batch_id:state.batchId, version:Number(form.elements.version.value), status:form.elements.status.value, payload:{ response_quality:form.elements.response_quality.value, dimensions, memos:{ observations:form.elements.observations.value } } };
     await api(`/api/comparison/annotation/${form.elements.coder_id.value}/${encodeURIComponent(form.elements.response_id.value)}`, { method:'PUT', body:JSON.stringify(body) });
     $('#comparison-edit-dialog').close(); notice('Saved administrative correction. Comparison results have been recalculated.');
     await loadComparison();

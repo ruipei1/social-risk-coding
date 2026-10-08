@@ -12,6 +12,7 @@
 
 .behavior-guide-group { margin: 8px 0; }
 .behavior-guide-group > summary { padding: 8px 0; cursor: pointer; font-weight: 600; }
+.batch-controls{margin:0 16px 14px;padding:12px;background:#eef3f7;border:1px solid var(--border);border-radius:8px}.batch-controls label{font-size:.75rem;color:var(--muted)}.batch-controls select{margin-top:4px;padding:8px;font-size:.82rem}.batch-controls button{padding:7px 0 2px}.batch-controls p{font-size:.72rem;line-height:1.4;margin-top:5px}.readonly-batch{background:#fafbfc}.readonly-batch:before{content:'Earlier batch — coding is read only';display:block;margin-bottom:14px;padding:9px 11px;border-radius:6px;background:#f4eadb;color:#79551f;font-size:.78rem;font-weight:600}
 .behavior-guide-group section { margin-left: 12px; }
 #behavior-family { margin-bottom: 12px; }
 
