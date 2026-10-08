@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compareReadings } from '../comparison.mjs';
-const reading=(id,codes=[],status='complete',quality='substantive',memo='')=>({coder_id:id,saved:true,status,response_quality:quality,observations:memo,dimensions:{behavior:codes.map(id=>({id})),who:[],setting:[]}});
+const reading=(id,codes=[],status='complete',quality='substantive',memo='')=>({coder_id:id,saved:true,status,response_quality:quality,observations:memo,dimensions:{behavior:codes.map(id=>({id})),anticipated_interpersonal_consequence:[],who:[],setting:[]}});
 test('order and duplicate labels do not create disagreement; observations are not scored',()=>{
  const r=compareReadings([reading(1,[2,1,1],'complete','substantive','One interpretation'),reading(2,[1,2],'complete','substantive','Another interpretation')]);
  assert.equal(r.result,'consistent');assert.equal(r.observationsDiffer,true);

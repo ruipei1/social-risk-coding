@@ -39,6 +39,9 @@ test('a name-only code enters the shared dimension pool without annotating a res
    assert.equal(created.status,200);
    const saved=(await s.request('/api/codes',b)).data.find(c=>c.id===created.data.id);
    assert.equal(saved.family,'Setting boundaries or leaving'); assert.equal(saved.name,'Setting a limit'); assert.equal(saved.dimension,'behavior'); assert.equal(saved.definition,'');
+   const consequence=await s.request('/api/codes',{...a,method:'POST',body:{dimension:'anticipated_interpersonal_consequence',name:'Embarrassment'}});
+   assert.equal(consequence.status,200);
+   assert.equal((await s.request('/api/codes',b)).data.find(c=>c.id===consequence.data.id).name,'Embarrassment');
    assert.equal(s.db.prepare('SELECT count(*) n FROM annotations').get().n,0);
    assert.equal((await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'  '}})).status,400);
  } finally {s.close();}
@@ -55,6 +58,16 @@ test('protected data, production preview and cross-origin requests are denied',a
 });
 test('annotations are independent per coder, persist, and detect conflicting saves',async()=>{
  const s=setup();try{const a=await s.login('coder-a','coder-a-test-password'),b=await s.login('coder-b','coder-b-test-password'),id='test-record:general_self_approach';assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:annotation()})).status,200);assert.equal((await s.request('/api/response/'+id,b)).data.annotation.version,0);assert.equal((await s.request('/api/response/'+id,a)).data.annotation.payload.dimensions.situation.note,'A personal boundary');assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:annotation('Stale change')})).status,409);assert.equal((await s.request('/api/annotation/'+id,{...b,method:'PUT',body:annotation('Independent reading')})).status,200);assert.equal(s.db.prepare('SELECT count(*) n FROM history').get().n,2);}finally{s.close();}
+});
+test('unread responses default Who is involved to Unspecified without writing an annotation',async()=>{
+ const s=setup();try{
+  const admin=await s.login('admin','administrator-test-password'),coder=await s.login('coder-a','coder-a-test-password');
+  const codeResult=await s.request('/api/codes',{...admin,method:'POST',body:{dimension:'who',name:'Unspecified'}});
+  const detail=(await s.request('/api/response/test-record:general_self_approach',coder)).data;
+  assert.deepEqual(detail.annotation.payload.dimensions.who.codes,[codeResult.data.id]);
+  assert.equal(detail.annotation.version,0);
+  assert.equal(s.db.prepare('SELECT count(*) n FROM annotations').get().n,0);
+ }finally{s.close();}
 });
 test('CSRF, fabricated quotations, and cross-dimension codes are rejected',async()=>{
  const s=setup();try{const a=await s.login('coder-a','coder-a-test-password'),id='test-record:general_self_approach';assert.equal((await s.request('/api/annotation/'+id,{cookie:a.cookie,method:'PUT',body:annotation()})).status,403);assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:annotation('note','Invented quote')})).status,400);const c=await s.request('/api/codes',{...a,method:'POST',body:code()});const data=annotation();data.payload.dimensions.behavior={codes:[c.data.id]};assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:data})).status,400);assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:annotation('note','stayed home.')})).status,200);}finally{s.close();}
@@ -76,7 +89,7 @@ test('simplified coding preserves hidden legacy fields and exports old and new a
  const s=setup(); try {
   const a=await s.login('coder-a','coder-a-test-password'), id='test-record:general_self_approach';
   const session=(await s.request('/api/session',a)).data;
-  assert.deepEqual(session.dimensions.map(d=>d.id),['behavior','who','setting']);
+  assert.deepEqual(session.dimensions.map(d=>d.id),['behavior','anticipated_interpersonal_consequence','who','setting']);
   await s.request('/api/annotation/'+id,{...a,method:'PUT',body:annotation('Keep this older situation')});
   // A genuinely old payload has no who or setting keys at all.
   const old=annotation().payload;
