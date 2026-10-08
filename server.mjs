@@ -1,4 +1,4 @@
-import { comparisonData } from './comparison.mjs';
+import { comparisonData, comparisonUsers } from './comparison.mjs';
 import http from 'node:http';
 import { observationsText } from './public/memos.js';
 import { readFileSync } from 'node:fs';
@@ -182,13 +182,49 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
           check(['all','disagreement','consistent','insufficient'].includes(filter), 'Invalid comparison filter.');
           const offset = Number(url.searchParams.get('offset') || 0);
           check(Number.isSafeInteger(offset) && offset >= 0, 'Invalid offset.');
+          const coders = comparisonUsers(db), coderParam = url.searchParams.get('coders');
+          let coderIds = null;
+          if (coderParam !== null) {
+            check(/^\d+(,\d+)*$/.test(coderParam), 'Select at least one valid coder.');
+            coderIds = [...new Set(coderParam.split(',').map(Number))];
+            const available = new Set(coders.map(coder => coder.id));
+            check(coderIds.every(id => available.has(id)), 'Selected coder not found.');
+          }
           const q = (url.searchParams.get('q') || '').trim().toLowerCase();
-          const rows = comparisonData(db, {includeDrafts:scope === 'all'});
+          const rows = comparisonData(db, {includeDrafts:scope === 'all',coderIds});
           const summary = { total:rows.length, disagreement:0, consistent:0, insufficient:0 };
           for (const row of rows) summary[row.result]++;
           const selected = rows.filter(r => (filter === 'all' || r.result === filter) &&
             (!q || [r.response.text,r.response.participant_label,r.response.prompt].some(s => s.toLowerCase().includes(q))));
-          return json({summary,total:selected.length,offset,limit:20,rows:selected.slice(offset,offset+20)});
+          return json({coders,selectedCoderIds:coderIds || coders.map(coder => coder.id),summary,total:selected.length,offset,limit:20,rows:selected.slice(offset,offset+20)});
+        }
+        if (req.method === 'PUT' && path.startsWith('/api/comparison/annotation/')) {
+          admin();
+          const parts = path.slice('/api/comparison/annotation/'.length).split('/');
+          check(parts.length === 2 && /^\d+$/.test(parts[0]), 'Invalid comparison edit target.');
+          const targetUserId = Number(parts[0]), responseId = decodeURIComponent(parts[1]), input = await body(req);
+          const target = db.prepare('SELECT id,username,name FROM users WHERE id=?').get(targetUserId); check(target, 'Coder not found.', 404);
+          const response = db.prepare('SELECT * FROM responses WHERE id=?').get(responseId); check(response, 'Response not found.', 404);
+          const current = annotation(responseId, targetUserId); check(current.version > 0, 'This coder has no saved reading to edit.', 404);
+          const version = number(input.version);
+          check(['draft', 'complete', 'flagged'].includes(input.status), 'Invalid annotation status.');
+          const submitted = input.payload || {};
+          const merged = {
+            ...current.payload,
+            ...submitted,
+            dimensions: { ...current.payload.dimensions, ...submitted.dimensions },
+            memos: { ...current.payload.memos, ...submitted.memos }
+          };
+          const payload = validatePayload(merged, current.payload);
+          for (const item of Object.values(payload.dimensions)) if (item.quote) check(response.text.includes(item.quote), 'A supporting excerpt does not match the original response.');
+          const updated = timestamp();
+          transaction(db, () => {
+            const latest = annotation(responseId, targetUserId);
+            check(latest.version === version, 'This reading changed after you opened it. Reopen the editor before saving.', 409);
+            db.prepare('UPDATE annotations SET status=?,payload=?,version=?,updated=? WHERE response_id=? AND user_id=?').run(input.status, JSON.stringify(payload), version + 1, updated, responseId, targetUserId);
+            db.prepare('INSERT INTO history(entity,entity_id,user_id,version,payload,created) VALUES (?,?,?,?,?,?)').run('annotation_admin_edit', responseId, user.id, version + 1, JSON.stringify({ target_user_id:targetUserId, target_username:target.username, status:input.status, payload }), updated);
+          });
+          return json({ version:version + 1, updated });
         }
         if (req.method === 'GET' && path === '/api/team') {
           admin();

@@ -50,7 +50,7 @@ This inserts the 75 starting categories as drafts and records their provenance i
 - The reading dimension is supplied automatically. For a new behavior, choose or create a broad category and enter the behavior name. Other dimensions ask only for a code name. Saving adds the code to that dimension’s shared category pool immediately, without assigning it to the current response. In the Codebook view, select a dimension before adding a code. Researchers may rename their own new codes, and administrators may rename any code. Older codebook entries are retained in exports. Code lifecycle metadata remains internal and in exports; there is no status field in the entry form.
 - A code's dimension cannot change after creation. Create a new code for a different dimension. There is no destructive code deletion or automatic code merging.
 - Concurrent edits are version-checked. A conflicting save is rejected rather than silently overwriting the other edit. The page retains unsaved text and asks you to copy it before reloading. Failed network saves also retain text in the open page, but this is not an offline app; do not close an unsaved page.
-- Administrators can add accounts in **Team**, inspect completion counts, export all annotations, and export the revision history. Team adjudication and side-by-side coder comparison are not included in this first version; use the exports for that stage.
+- Administrators can add accounts in **Team**, inspect completion counts, export all annotations, and export the revision history. Administrators can use Compare coders for a read-only side-by-side review. Adjudication is not implemented; independent readings remain unchanged.
 - All annotation saves and code edits create history entries. CSV exports use current code labels; the JSON history retains earlier definitions and annotation versions.
 - Progress includes all imported response slots, including blanks, so the denominator is 5,264 for this dataset. The initial reading queue contains 5,075 nonblank responses. “NA” and similar participant-entered strings are retained as text for a researcher to classify.
 
@@ -145,3 +145,23 @@ Tests use temporary synthetic data and exercise imports, exact text preservation
 ## Render deployment
 
 `render.yaml` provisions one 512 MB web service and a 1 GB persistent disk. Keep the workspace on Hobby. The app uses Render's HTTPS `RENDER_EXTERNAL_URL` automatically; set `APP_ORIGIN` only if switching to a custom domain. The disk is mounted at `/var/data`, and `DB_PATH` points there. No data or accounts are embedded in the repository. Transfer a consistent database backup separately before inviting researchers, and set a usable administrator password via the management CLI. Revoke migrated sessions. Do not use preview mode on Render.
+
+## Compare coders
+
+Administrators have a **Compare coders** navigation section backed by `GET /api/comparison`. It reads the current database directly, parses each saved annotation payload, resolves code IDs against the shared codebook, and displays the response beside each researcher’s username, labels, response type, and observations. An administrator can edit an existing saved reading from this view, including its status, labels, response type, and observations. The participant's original response text remains immutable. Corrections use optimistic version checks and create `annotation_admin_edit` revision-history entries naming the affected coder and the administrator who made the change. On Render this uses the live persistent database; local preview uses its configured database. No history upload, manual username map, or database migration is needed.
+
+Completed readings are compared by default; the provisional option includes draft and flagged readings. Administrators can include or exclude individual coders from the comparison, and the response list, summary counts, field highlighting, and disagreement labels are recalculated from only the selected coders. At least two eligible readings are required. Disagreement means unequal code-ID sets in Behavior, Who, or Setting, or different response types. Code selection order does not matter. Differing fields and labels receive amber highlighting and explicit text. Free-text Observations differences are called out for review, not scored as label disagreements.
+
+Active accounts and inactive accounts with saved work appear as separate columns. Missing readings are shown explicitly and excluded from agreement calculations. Matching empty code sets carry a warning. “Consistent” refers only to the compared readings; it does not establish coding validity or team consensus. The page includes saved responses only, search, agreement filters, and pagination. Access is administrator-only so independent coders cannot see one another’s readings through the UI or API. Disagreement is derived from the current saved readings rather than stored as a separate flag, so it is recalculated immediately after an administrative correction. No separate adjudication or resolution flag is written.
+
+The parser can also produce a standalone comparison report from a database file without modifying it:
+
+```sh
+node comparison.mjs /path/to/coding.sqlite > comparison-report.json
+# Include unfinished readings provisionally:
+node comparison.mjs /path/to/coding.sqlite --include-drafts > provisional-report.json
+```
+
+These reports contain research data; keep them with research outputs, not in the source repository.
+
+Deployment note: include `comparison.mjs`, `server.mjs`, `public/app.js`, `public/index.html`, `public/style.css`, the updated Dockerfile, and tests. Existing databases require no migration. The October 5 local implementation was tested with the supplied history in an isolated preview: one response disagrees across two completed readings; six responses lack two completed readings. Published to GitHub main and Render on October 6, 2026 (UTC), final commit ab7ae617d423543c00dccd337d5bae1a04f2609d. Render passed all 17 tests; the live health check passed and the comparison endpoint returned 401 without authentication. The deployed comparison markup was verified; a new sign-in is needed for post-deployment administrator UI inspection.
