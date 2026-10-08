@@ -111,7 +111,25 @@ test('comparison is admin-only and distinguishes disagreements from missing read
   result=(await s.request('/api/comparison?filter=disagreement',admin)).data;
   assert.equal(result.total,1);assert.equal(result.rows[0].fields.behavior.differs,true);
   assert.equal(result.rows[0].missing,1);assert.deepEqual(result.rows[0].fields.behavior.differingIds,[c.data.id]);
-  assert.equal(result.rows[0].readings.find(r=>r.username==='coder-a').dimensions.behavior[0].name,'Taking a class');
+  const coderA=result.rows[0].readings.find(r=>r.username==='coder-a');
+  assert.equal(coderA.dimensions.behavior[0].name,'Taking a class');
+  const coderB=result.rows[0].readings.find(r=>r.username==='coder-b');
+  const selected=(await s.request(`/api/comparison?coders=${coderA.coder_id},${coderB.coder_id}`,admin)).data;
+  assert.deepEqual(selected.selectedCoderIds,[coderA.coder_id,coderB.coder_id]);assert.equal(selected.rows[0].readings.length,2);assert.equal(selected.rows[0].result,'disagreement');
+  const oneCoder=(await s.request(`/api/comparison?coders=${coderA.coder_id}`,admin)).data;
+  assert.equal(oneCoder.rows[0].readings.length,1);assert.equal(oneCoder.rows[0].result,'insufficient');assert.equal(oneCoder.rows[0].fields.behavior.differs,false);
+  assert.equal((await s.request('/api/comparison?coders=',admin)).status,400);assert.equal((await s.request('/api/comparison?coders=999999',admin)).status,400);
+  const correction={version:coderB.version,status:'complete',payload:{response_quality:'substantive',dimensions:{behavior:{codes:[c.data.id]},who:{codes:[]},setting:{codes:[]}},memos:{observations:'Reviewed together.'}}};
+  const editPath=`/api/comparison/annotation/${coderB.coder_id}/${encodeURIComponent(id)}`;
+  assert.equal((await s.request(editPath,{...a,method:'PUT',body:correction})).status,403);
+  assert.equal((await s.request(editPath,{...admin,method:'PUT',body:correction})).status,200);
+  assert.equal((await s.request(editPath,{...admin,method:'PUT',body:correction})).status,409);
+  result=(await s.request('/api/comparison',admin)).data;
+  assert.equal(result.rows[0].result,'consistent');assert.equal(result.rows[0].fields.behavior.differs,false);
+  const corrected=result.rows[0].readings.find(r=>r.username==='coder-b');
+  assert.deepEqual(corrected.dimensions.behavior.map(code=>code.id),[c.data.id]);assert.equal(corrected.observations,'Reviewed together.');assert.equal(corrected.version,2);
+  const audit=s.db.prepare("SELECT * FROM history WHERE entity='annotation_admin_edit'").get();
+  assert.equal(audit.user_id,s.db.prepare("SELECT id FROM users WHERE username='admin'").get().id);assert.equal(JSON.parse(audit.payload).target_user_id,coderB.coder_id);
   assert.equal((await s.request('/api/comparison?q=doesnotexist',admin)).data.total,0);
   assert.equal((await s.request('/api/comparison?offset=-1',admin)).status,400);
  } finally {s.close();}
