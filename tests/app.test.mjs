@@ -56,6 +56,9 @@ test('changed source is rejected atomically, preserving original responses',()=>
 test('protected data, production preview and cross-origin requests are denied',async()=>{
  const s=setup();try{assert.equal((await s.request('/api/responses')).status,401);assert.equal((await s.request('/api/preview-login',{method:'POST',body:{}})).status,403);assert.equal((await s.request('/api/login',{method:'POST',body:{username:'admin',password:'administrator-test-password'},origin:'http://evil.example'})).status,403);assert.equal((await s.request('/data/coding.sqlite')).status,404);}finally{s.close();}
 });
+test('the browser selection helper is served as JavaScript',async()=>{
+ const s=setup();try{const response=await s.request('/selections.js');assert.equal(response.status,200);assert.match(response.headers['content-type'],/^text\/javascript/);assert.match(response.output,/addSelectedCode/);}finally{s.close();}
+});
 test('annotations are independent per coder, persist, and detect conflicting saves',async()=>{
  const s=setup();try{const a=await s.login('coder-a','coder-a-test-password'),b=await s.login('coder-b','coder-b-test-password'),id='test-record:general_self_approach';assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:annotation()})).status,200);assert.equal((await s.request('/api/response/'+id,b)).data.annotation.version,0);assert.equal((await s.request('/api/response/'+id,a)).data.annotation.payload.dimensions.situation.note,'A personal boundary');assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:annotation('Stale change')})).status,409);assert.equal((await s.request('/api/annotation/'+id,{...b,method:'PUT',body:annotation('Independent reading')})).status,200);assert.equal(s.db.prepare('SELECT count(*) n FROM history').get().n,2);}finally{s.close();}
 });
