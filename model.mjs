@@ -40,11 +40,57 @@ export function openDB(filename = process.env.DB_PATH || resolve('data', 'coding
     CREATE INDEX IF NOT EXISTS idx_responses_record ON responses(record_number);
     CREATE INDEX IF NOT EXISTS idx_responses_prompt ON responses(prompt, record_number);
     CREATE TABLE IF NOT EXISTS annotations (response_id TEXT NOT NULL REFERENCES responses(id), user_id INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL, payload TEXT NOT NULL, version INTEGER NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(response_id,user_id));
-    CREATE INDEX IF NOT EXISTS idx_annotations_user_status ON annotations(user_id,status);
     CREATE TABLE IF NOT EXISTS codes (id INTEGER PRIMARY KEY, dimension TEXT NOT NULL, name TEXT NOT NULL, definition TEXT NOT NULL, include_rule TEXT NOT NULL, exclude_rule TEXT NOT NULL, example TEXT NOT NULL, status TEXT NOT NULL, author_id INTEGER NOT NULL REFERENCES users(id), version INTEGER NOT NULL, updated TEXT NOT NULL, UNIQUE(dimension,name));
     CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, entity TEXT NOT NULL, entity_id TEXT NOT NULL, user_id INTEGER NOT NULL REFERENCES users(id), version INTEGER NOT NULL, payload TEXT NOT NULL, created TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS login_attempts (key TEXT PRIMARY KEY, attempts INTEGER NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS imports (id INTEGER PRIMARY KEY, filename TEXT NOT NULL, digest TEXT NOT NULL, records INTEGER NOT NULL, imported TEXT NOT NULL);
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS coding_batches (
+      id INTEGER PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,
+      start_participant TEXT NOT NULL DEFAULT '',
+      start_record_number INTEGER NOT NULL DEFAULT 1,
+      active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0,1)),
+      created_by INTEGER REFERENCES users(id),
+      created TEXT NOT NULL
+    );
+  `);
+  let activeBatch = db.prepare('SELECT id FROM coding_batches WHERE active=1 ORDER BY id DESC LIMIT 1').get();
+  if (!activeBatch) {
+    const initial = db.prepare("SELECT id FROM coding_batches WHERE name='Initial coding'").get();
+    if (initial) {
+      db.prepare('UPDATE coding_batches SET active=1 WHERE id=?').run(initial.id);
+      activeBatch = initial;
+    } else {
+      const id = Number(db.prepare('INSERT INTO coding_batches(name,start_participant,start_record_number,active,created) VALUES (?,?,?,?,?)')
+        .run('Initial coding', '', 1, 1, timestamp()).lastInsertRowid);
+      activeBatch = { id };
+    }
+  }
+  if (!db.prepare('PRAGMA table_info(annotations)').all().some(column => column.name === 'batch_id')) {
+    transaction(db, () => {
+      db.exec(`
+        ALTER TABLE annotations RENAME TO annotations_before_batches;
+        CREATE TABLE annotations (
+          response_id TEXT NOT NULL REFERENCES responses(id),
+          user_id INTEGER NOT NULL REFERENCES users(id),
+          batch_id INTEGER NOT NULL REFERENCES coding_batches(id),
+          status TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          updated TEXT NOT NULL,
+          PRIMARY KEY(response_id,user_id,batch_id)
+        );
+      `);
+      db.prepare('INSERT INTO annotations(response_id,user_id,batch_id,status,payload,version,updated) SELECT response_id,user_id,?,status,payload,version,updated FROM annotations_before_batches').run(activeBatch.id);
+      db.exec('DROP TABLE annotations_before_batches');
+    });
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_annotations_user_batch_status ON annotations(user_id,batch_id,status);
+    CREATE INDEX IF NOT EXISTS idx_annotations_batch_response ON annotations(batch_id,response_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_coding_batches_one_active ON coding_batches(active) WHERE active=1;
   `);
   if (!db.prepare("PRAGMA table_info(codes)").all().some(c => c.name === "family")) db.exec("ALTER TABLE codes ADD COLUMN family TEXT NOT NULL DEFAULT ''");
   return db;

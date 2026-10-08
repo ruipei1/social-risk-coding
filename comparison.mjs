@@ -24,24 +24,26 @@ export function compareReadings(readings, { includeDrafts = false } = {}) {
     noLabels: eligible.length >= 2 && eligible.every(r => DIMENSIONS.every(d => r.dimensions[d.id].length === 0)) };
 }
 
-export function comparisonUsers(db) {
-  return db.prepare('SELECT id,username,name,active FROM users WHERE active=1 OR id IN (SELECT user_id FROM annotations) ORDER BY id').all().map(user => ({ ...user, active:!!user.active }));
+export function comparisonUsers(db, batchId = null) {
+  batchId ??= db.prepare('SELECT id FROM coding_batches WHERE active=1').get()?.id;
+  return db.prepare('SELECT id,username,name,active FROM users WHERE active=1 OR id IN (SELECT user_id FROM annotations WHERE batch_id=?) ORDER BY id').all(batchId).map(user => ({ ...user, active:!!user.active }));
 }
 
 export function comparisonData(db, options = {}) {
-  const allUsers = comparisonUsers(db), selectedIds = options.coderIds == null ? null : new Set(options.coderIds);
+  const batchId = options.batchId ?? db.prepare('SELECT id FROM coding_batches WHERE active=1').get()?.id;
+  const allUsers = comparisonUsers(db, batchId), selectedIds = options.coderIds == null ? null : new Set(options.coderIds);
   const users = selectedIds == null ? allUsers : allUsers.filter(user => selectedIds.has(user.id));
-  const userWhere = selectedIds == null ? '' : ` WHERE user_id IN (${users.map(() => '?').join(',')})`;
+  const userWhere = selectedIds == null ? '' : ` AND user_id IN (${users.map(() => '?').join(',')})`;
   const userArgs = selectedIds == null ? [] : users.map(user => user.id);
   const codes = new Map(db.prepare('SELECT id,dimension,name,family,status FROM codes').all().map(c => [c.id,c]));
-  const saved = db.prepare(`SELECT * FROM annotations${userWhere} ORDER BY response_id,user_id`).all(...userArgs);
+  const saved = db.prepare(`SELECT * FROM annotations WHERE batch_id=?${userWhere} ORDER BY response_id,user_id`).all(batchId,...userArgs);
   const byResponse = new Map();
   for (const a of saved) {
     if (!byResponse.has(a.response_id)) byResponse.set(a.response_id, new Map());
     byResponse.get(a.response_id).set(a.user_id,a);
   }
-  const annotationWhere = selectedIds == null ? '' : ` WHERE user_id IN (${users.map(() => '?').join(',')})`;
-  const responses = db.prepare(`SELECT id,participant_label,prompt,text FROM responses WHERE id IN (SELECT response_id FROM annotations${annotationWhere}) ORDER BY record_number,rowid`).all(...userArgs);
+  const annotationWhere = selectedIds == null ? '' : ` AND user_id IN (${users.map(() => '?').join(',')})`;
+  const responses = db.prepare(`SELECT id,participant_label,prompt,text FROM responses WHERE id IN (SELECT response_id FROM annotations WHERE batch_id=?${annotationWhere}) ORDER BY record_number,rowid`).all(batchId,...userArgs);
   return responses.map(response => {
     const readings = users.map(u => {
       const a = byResponse.get(response.id).get(u.id);

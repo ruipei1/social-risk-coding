@@ -147,11 +147,12 @@ function migrateAssignedCodes(db, replacements, authorId) {
     }
     if (!changed) continue;
     const updated = timestamp(), version = row.version + 1;
-    db.prepare('UPDATE annotations SET payload=?,version=?,updated=? WHERE response_id=? AND user_id=?')
-      .run(JSON.stringify(payload), version, updated, row.response_id, row.user_id);
+    db.prepare('UPDATE annotations SET payload=?,version=?,updated=? WHERE response_id=? AND user_id=? AND batch_id=?')
+      .run(JSON.stringify(payload), version, updated, row.response_id, row.user_id, row.batch_id);
     db.prepare('INSERT INTO history(entity,entity_id,user_id,version,payload,created) VALUES (?,?,?,?,?,?)')
       .run('annotation_codebook_migration', row.response_id, authorId, version, JSON.stringify({
         target_user_id: row.user_id,
+        batch_id: row.batch_id,
         status: row.status,
         payload,
         previous_payload: prior,

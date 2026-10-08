@@ -33,12 +33,25 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
     res.setHeader('Set-Cookie', `coding_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secure ? '; Secure' : ''}`);
     return { user: { id: user.id, name: user.name, username: user.username, role: user.role }, csrf };
   }
-  function annotation(responseId, userId) {
-    const saved = db.prepare('SELECT * FROM annotations WHERE response_id=? AND user_id=?').get(responseId, userId);
+  function activeBatch() {
+    const batch = db.prepare('SELECT * FROM coding_batches WHERE active=1').get();
+    check(batch, 'No active coding batch is available.', 503);
+    return batch;
+  }
+  function batchById(value, { writable = false } = {}) {
+    const id = value == null || value === '' ? activeBatch().id : Number(value);
+    check(Number.isSafeInteger(id) && id > 0, 'Invalid coding batch.');
+    const batch = db.prepare('SELECT * FROM coding_batches WHERE id=?').get(id);
+    check(batch, 'Coding batch not found.', 404);
+    if (writable) check(batch.active === 1, 'Past coding batches are read-only. Switch to the current batch to save changes.', 409);
+    return batch;
+  }
+  function annotation(responseId, userId, batchId) {
+    const saved = db.prepare('SELECT * FROM annotations WHERE response_id=? AND user_id=? AND batch_id=?').get(responseId, userId, batchId);
     if (saved) return { ...saved, payload: JSON.parse(saved.payload) };
     const unspecified = db.prepare("SELECT id FROM codes WHERE dimension='who' AND name='Unspecified' AND status!='retired'").get();
     const dimensions = unspecified ? { who: { codes:[unspecified.id], note:'', quote:'', evidence:'unreviewed' } } : {};
-    return { version: 0, status: 'unread', payload: { dimensions, memos: {}, response_quality: 'substantive' } };
+    return { version: 0, status: 'unread', batch_id: batchId, payload: { dimensions, memos: {}, response_quality: 'substantive' } };
   }
   function validatePayload(payload, previous = {}) {
     check(payload && typeof payload === 'object', 'Missing annotation.');
@@ -107,44 +120,79 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
           res.setHeader('Set-Cookie', 'coding_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
           return json({ ok: true });
         }
+        if (req.method === 'GET' && path === '/api/batches') {
+          const batches = db.prepare(`
+            SELECT b.*,u.name created_by_name,count(a.response_id) saved_annotations
+            FROM coding_batches b
+            LEFT JOIN users u ON u.id=b.created_by
+            LEFT JOIN annotations a ON a.batch_id=b.id
+            GROUP BY b.id ORDER BY b.id DESC
+          `).all();
+          const participants = db.prepare('SELECT participant_label,min(record_number) record_number FROM responses GROUP BY participant_label ORDER BY record_number').all();
+          return json({ batches, participants, active_batch_id: activeBatch().id });
+        }
+        if (req.method === 'POST' && path === '/api/batches') {
+          admin();
+          const input = await body(req), name = str(input.name, 100).trim(), startParticipant = str(input.start_participant || '', 100).trim();
+          check(name, 'A batch name is required.');
+          let startRecordNumber = 1;
+          if (startParticipant) {
+            const participant = db.prepare('SELECT participant_label,min(record_number) record_number FROM responses WHERE participant_label=? COLLATE NOCASE GROUP BY participant_label').get(startParticipant);
+            check(participant, 'Starting participant not found. Choose a participant from the list.');
+            startRecordNumber = participant.record_number;
+          }
+          const created = timestamp(); let id;
+          transaction(db, () => {
+            db.prepare('UPDATE coding_batches SET active=0 WHERE active=1').run();
+            id = Number(db.prepare('INSERT INTO coding_batches(name,start_participant,start_record_number,active,created_by,created) VALUES (?,?,?,?,?,?)')
+              .run(name, startParticipant, startRecordNumber, 1, user.id, created).lastInsertRowid);
+            db.prepare('INSERT INTO history(entity,entity_id,user_id,version,payload,created) VALUES (?,?,?,?,?,?)')
+              .run('coding_batch', String(id), user.id, 1, JSON.stringify({ name, start_participant:startParticipant, start_record_number:startRecordNumber }), created);
+          });
+          return json({ id, name, start_participant:startParticipant, start_record_number:startRecordNumber, active:1, created });
+        }
         if (req.method === 'GET' && path === '/api/stats') {
+          const batch = batchById(url.searchParams.get('batch'));
           const counts = db.prepare('SELECT count(*) total, sum(blank=0) nonblank, count(DISTINCT record_key) records FROM responses').get();
-          const mine = db.prepare('SELECT status, count(*) n FROM annotations WHERE user_id=? GROUP BY status').all(user.id);
-          return json({ ...counts, mine, byPrompt: db.prepare("SELECT r.prompt, count(*) total, sum(r.blank=0) nonblank, sum(COALESCE(a.status,'unread')='complete') complete FROM responses r LEFT JOIN annotations a ON a.response_id=r.id AND a.user_id=? GROUP BY r.prompt").all(user.id) });
+          const mine = db.prepare('SELECT status, count(*) n FROM annotations WHERE user_id=? AND batch_id=? GROUP BY status').all(user.id, batch.id);
+          return json({ ...counts, batch, mine, byPrompt: db.prepare("SELECT r.prompt, count(*) total, sum(r.blank=0) nonblank, sum(COALESCE(a.status,'unread')='complete') complete FROM responses r LEFT JOIN annotations a ON a.response_id=r.id AND a.user_id=? AND a.batch_id=? GROUP BY r.prompt").all(user.id, batch.id) });
         }
         if (req.method === 'GET' && path === '/api/responses') {
-          const where = [], args = [user.id];
+          const batch = batchById(url.searchParams.get('batch'));
+          const where = [], args = [user.id, batch.id];
           for (const key of ['domain', 'perspective', 'direction', 'pool']) if (url.searchParams.get(key)) { where.push(`r.${key}=?`); args.push(url.searchParams.get(key)); }
           const search = url.searchParams.get('q')?.slice(0, 200);
           if (search) { where.push("(r.text LIKE ? ESCAPE '\\' OR r.participant_label LIKE ? ESCAPE '\\')"); const term = '%' + search.replace(/[\\%_]/g, '\\$&') + '%'; args.push(term, term); }
           if (url.searchParams.get('blanks') !== '1') where.push('r.blank=0');
           const status = url.searchParams.get('status');
           if (status) { where.push("COALESCE(a.status,'unread')=?"); args.push(status); }
-          const from = `FROM responses r LEFT JOIN annotations a ON a.response_id=r.id AND a.user_id=? ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`;
+          const from = `FROM responses r LEFT JOIN annotations a ON a.response_id=r.id AND a.user_id=? AND a.batch_id=? ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`;
           const total = db.prepare('SELECT count(*) n ' + from).get(...args).n;
           const offset = Math.max(0, Math.min(100000, parseInt(url.searchParams.get('offset') || '0') || 0));
-          const list = db.prepare("SELECT r.id,r.participant_label,r.record_number,r.prompt,r.text,r.blank,COALESCE(a.status,'unread') status " + from + ' ORDER BY r.record_number, r.rowid LIMIT 40 OFFSET ?').all(...args, offset);
-          return json({ total, offset, responses: list });
+          const list = db.prepare("SELECT r.id,r.participant_label,r.record_number,r.prompt,r.text,r.blank,COALESCE(a.status,'unread') status " + from + ' ORDER BY CASE WHEN r.record_number>=? THEN 0 ELSE 1 END,r.record_number,r.rowid LIMIT 40 OFFSET ?').all(...args, batch.start_record_number, offset);
+          return json({ total, offset, batch, responses: list });
         }
         if (req.method === 'GET' && path.startsWith('/api/response/')) {
+          const batch = batchById(url.searchParams.get('batch'));
           const id = decodeURIComponent(path.slice('/api/response/'.length));
           const response = db.prepare('SELECT * FROM responses WHERE id=?').get(id); check(response, 'Response not found.', 404);
           const related = db.prepare('SELECT id,prompt,text,blank FROM responses WHERE record_key=? ORDER BY rowid').all(response.record_key);
-          return json({ response, annotation: annotation(id, user.id), related });
+          return json({ response, annotation: annotation(id, user.id, batch.id), batch, related });
         }
         if (req.method === 'PUT' && path.startsWith('/api/annotation/')) {
           const id = decodeURIComponent(path.slice('/api/annotation/'.length)), input = await body(req);
+          const batch = batchById(input.batch_id, { writable:true });
           const response = db.prepare('SELECT * FROM responses WHERE id=?').get(id); check(response, 'Response not found.', 404);
-          const version = number(input.version), payload = validatePayload(input.payload, annotation(id, user.id).payload);
+          const version = number(input.version), payload = validatePayload(input.payload, annotation(id, user.id, batch.id).payload);
           check(['draft', 'complete', 'flagged'].includes(input.status), 'Invalid annotation status.');
           // Every quoted passage must be present in the original response.
           for (const item of Object.values(payload.dimensions)) if (item.quote) check(response.text.includes(item.quote), 'A supporting excerpt does not match the original response.');
           const updated = timestamp();
           transaction(db, () => {
-            const current = annotation(id, user.id);
+            const current = annotation(id, user.id, batch.id);
             check(current.version === version, 'This response was saved in another tab. Your changes are still here; copy them before reloading.', 409);
-            db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?) ON CONFLICT(response_id,user_id) DO UPDATE SET status=excluded.status,payload=excluded.payload,version=excluded.version,updated=excluded.updated').run(id, user.id, input.status, JSON.stringify(payload), version + 1, updated);
-            db.prepare('INSERT INTO history(entity,entity_id,user_id,version,payload,created) VALUES (?,?,?,?,?,?)').run('annotation', id, user.id, version + 1, JSON.stringify({ status: input.status, payload }), updated);
+            db.prepare('INSERT INTO annotations(response_id,user_id,batch_id,status,payload,version,updated) VALUES (?,?,?,?,?,?,?) ON CONFLICT(response_id,user_id,batch_id) DO UPDATE SET status=excluded.status,payload=excluded.payload,version=excluded.version,updated=excluded.updated').run(id, user.id, batch.id, input.status, JSON.stringify(payload), version + 1, updated);
+            db.prepare('INSERT INTO history(entity,entity_id,user_id,version,payload,created) VALUES (?,?,?,?,?,?)').run('annotation', id, user.id, version + 1, JSON.stringify({ batch_id:batch.id, status: input.status, payload }), updated);
           });
           return json({ version: version + 1, updated });
         }
@@ -180,13 +228,14 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
         }
         if (req.method === 'GET' && path === '/api/comparison') {
           admin();
+          const batch = batchById(url.searchParams.get('batch'));
           const scope = url.searchParams.get('scope') || 'complete';
           check(['complete','all'].includes(scope), 'Invalid comparison scope.');
           const filter = url.searchParams.get('filter') || 'all';
           check(['all','disagreement','consistent','insufficient'].includes(filter), 'Invalid comparison filter.');
           const offset = Number(url.searchParams.get('offset') || 0);
           check(Number.isSafeInteger(offset) && offset >= 0, 'Invalid offset.');
-          const coders = comparisonUsers(db), coderParam = url.searchParams.get('coders');
+          const coders = comparisonUsers(db, batch.id), coderParam = url.searchParams.get('coders');
           let coderIds = null;
           if (coderParam !== null) {
             check(/^\d+(,\d+)*$/.test(coderParam), 'Select at least one valid coder.');
@@ -195,21 +244,22 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
             check(coderIds.every(id => available.has(id)), 'Selected coder not found.');
           }
           const q = (url.searchParams.get('q') || '').trim().toLowerCase();
-          const rows = comparisonData(db, {includeDrafts:scope === 'all',coderIds});
+          const rows = comparisonData(db, {includeDrafts:scope === 'all',coderIds,batchId:batch.id});
           const summary = { total:rows.length, disagreement:0, consistent:0, insufficient:0 };
           for (const row of rows) summary[row.result]++;
           const selected = rows.filter(r => (filter === 'all' || r.result === filter) &&
             (!q || [r.response.text,r.response.participant_label,r.response.prompt].some(s => s.toLowerCase().includes(q))));
-          return json({coders,selectedCoderIds:coderIds || coders.map(coder => coder.id),summary,total:selected.length,offset,limit:20,rows:selected.slice(offset,offset+20)});
+          return json({batch,coders,selectedCoderIds:coderIds || coders.map(coder => coder.id),summary,total:selected.length,offset,limit:20,rows:selected.slice(offset,offset+20)});
         }
         if (req.method === 'PUT' && path.startsWith('/api/comparison/annotation/')) {
           admin();
           const parts = path.slice('/api/comparison/annotation/'.length).split('/');
           check(parts.length === 2 && /^\d+$/.test(parts[0]), 'Invalid comparison edit target.');
           const targetUserId = Number(parts[0]), responseId = decodeURIComponent(parts[1]), input = await body(req);
+          const batch = batchById(input.batch_id, { writable:true });
           const target = db.prepare('SELECT id,username,name FROM users WHERE id=?').get(targetUserId); check(target, 'Coder not found.', 404);
           const response = db.prepare('SELECT * FROM responses WHERE id=?').get(responseId); check(response, 'Response not found.', 404);
-          const current = annotation(responseId, targetUserId); check(current.version > 0, 'This coder has no saved reading to edit.', 404);
+          const current = annotation(responseId, targetUserId, batch.id); check(current.version > 0, 'This coder has no saved reading to edit.', 404);
           const version = number(input.version);
           check(['draft', 'complete', 'flagged'].includes(input.status), 'Invalid annotation status.');
           const submitted = input.payload || {};
@@ -223,16 +273,17 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
           for (const item of Object.values(payload.dimensions)) if (item.quote) check(response.text.includes(item.quote), 'A supporting excerpt does not match the original response.');
           const updated = timestamp();
           transaction(db, () => {
-            const latest = annotation(responseId, targetUserId);
+            const latest = annotation(responseId, targetUserId, batch.id);
             check(latest.version === version, 'This reading changed after you opened it. Reopen the editor before saving.', 409);
-            db.prepare('UPDATE annotations SET status=?,payload=?,version=?,updated=? WHERE response_id=? AND user_id=?').run(input.status, JSON.stringify(payload), version + 1, updated, responseId, targetUserId);
-            db.prepare('INSERT INTO history(entity,entity_id,user_id,version,payload,created) VALUES (?,?,?,?,?,?)').run('annotation_admin_edit', responseId, user.id, version + 1, JSON.stringify({ target_user_id:targetUserId, target_username:target.username, status:input.status, payload }), updated);
+            db.prepare('UPDATE annotations SET status=?,payload=?,version=?,updated=? WHERE response_id=? AND user_id=? AND batch_id=?').run(input.status, JSON.stringify(payload), version + 1, updated, responseId, targetUserId, batch.id);
+            db.prepare('INSERT INTO history(entity,entity_id,user_id,version,payload,created) VALUES (?,?,?,?,?,?)').run('annotation_admin_edit', responseId, user.id, version + 1, JSON.stringify({ batch_id:batch.id, target_user_id:targetUserId, target_username:target.username, status:input.status, payload }), updated);
           });
           return json({ version:version + 1, updated });
         }
         if (req.method === 'GET' && path === '/api/team') {
           admin();
-          return json(db.prepare("SELECT u.id,u.username,u.name,u.role,u.active,count(a.response_id) started,sum(a.status='complete') complete,sum(a.status='flagged') flagged FROM users u LEFT JOIN annotations a ON a.user_id=u.id GROUP BY u.id ORDER BY u.id").all());
+          const batch = batchById(url.searchParams.get('batch'));
+          return json(db.prepare("SELECT u.id,u.username,u.name,u.role,u.active,count(a.response_id) started,sum(a.status='complete') complete,sum(a.status='flagged') flagged FROM users u LEFT JOIN annotations a ON a.user_id=u.id AND a.batch_id=? GROUP BY u.id ORDER BY u.id").all(batch.id));
         }
         if (req.method === 'POST' && path === '/api/users') {
           admin(); const input = await body(req);
@@ -250,8 +301,8 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
             return res.end(JSON.stringify(db.prepare('SELECT * FROM history ORDER BY id').all(), null, 2));
           }
           const all = url.searchParams.get('all') === '1'; if (all) admin();
-          const rows = db.prepare(`SELECT r.record_key,r.participant_key,r.participant_label,r.prompt,r.source,r.pool,r.wave,r.complete survey_complete,r.text,u.username coder,a.status,a.payload,a.version,a.updated FROM annotations a JOIN responses r ON r.id=a.response_id JOIN users u ON u.id=a.user_id ${all ? '' : 'WHERE a.user_id=?'} ORDER BY r.record_number,r.rowid,u.id`).all(...(all ? [] : [user.id]));
-          const fields = ['record_key','participant_key','participant_label','prompt','source','pool','wave','survey_complete','text','coder','status','response_quality','version','updated'];
+          const rows = db.prepare(`SELECT b.id batch_id,b.name coding_batch,b.active batch_active,b.start_participant,r.record_key,r.participant_key,r.participant_label,r.prompt,r.source,r.pool,r.wave,r.complete survey_complete,r.text,u.username coder,a.status,a.payload,a.version,a.updated FROM annotations a JOIN coding_batches b ON b.id=a.batch_id JOIN responses r ON r.id=a.response_id JOIN users u ON u.id=a.user_id ${all ? '' : 'WHERE a.user_id=?'} ORDER BY b.id,r.record_number,r.rowid,u.id`).all(...(all ? [] : [user.id]));
+          const fields = ['batch_id','coding_batch','batch_active','start_participant','record_key','participant_key','participant_label','prompt','source','pool','wave','survey_complete','text','coder','status','response_quality','version','updated'];
           for (const d of ALL_DIM_IDS) fields.push(`${d}_note`, `${d}_code_ids`, `${d}_code_names`, `${d}_quote`, `${d}_evidence`);
           fields.push('memo_observations','memo_at_stake','memo_unstated','memo_context','memo_reflection');
           const codeMap = new Map(db.prepare('SELECT id,name FROM codes').all().map(c => [c.id, c.name]));

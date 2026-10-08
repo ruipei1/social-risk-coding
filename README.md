@@ -47,11 +47,17 @@ This inserts the 67 starting labels as drafts and records their provenance in th
 
 ## Shared codebook and team behavior
 
-- Each account has independent annotations and progress. An RA cannot retrieve or overwrite another RA's annotations through the API. All researchers see the same responses and shared codebook; assignment-based restrictions are not implemented.
+- Each account has independent annotations and progress within each coding batch. An RA cannot retrieve or overwrite another RA's annotations through the API. All researchers see the same responses and shared codebook; assignment-based restrictions are not implemented.
 - The reading dimension is supplied automatically. For a new behavior, choose or create a broad category and enter the behavior name. Other dimensions ask only for a code name. Saving adds the code to that dimension’s shared category pool immediately, without assigning it to the current response. In the Codebook view, select a dimension before adding a code. Researchers may rename their own new codes, and administrators may rename any code. Older codebook entries are retained in exports. Code lifecycle metadata remains internal and in exports; there is no status field in the entry form.
 - A code's dimension cannot change after creation. Create a new code for a different dimension. There is no destructive code deletion or automatic code merging.
 - Concurrent edits are version-checked. A conflicting save is rejected rather than silently overwriting the other edit. The page retains unsaved text and asks you to copy it before reloading. Failed network saves also retain text in the open page, but this is not an offline app; do not close an unsaved page.
-- Administrators can add accounts in **Team**, inspect completion counts, export all annotations, and export the revision history. Administrators can use Compare coders for a read-only side-by-side review. Adjudication is not implemented; independent readings remain unchanged.
+- Administrators can add accounts in **Team**, start named coding batches, inspect completion counts, export all annotations, and export the revision history. Administrators can use Compare coders for a side-by-side review. Adjudication is not implemented; independent readings remain separate.
+
+## Coding batches and repeated passes
+
+The **Coding batch** selector in the reading queue keeps repeated coding passes separate. An administrator can choose **New batch**, give the pass a name, and optionally select a participant such as `P041` as the starting point. The new batch begins with no saved annotations. Its queue starts at the chosen participant, continues to the end of the response set, and then wraps around to the beginning, so repeated pilots do not always begin with `P001`.
+
+Starting a new batch makes the previous batch read-only; it does not delete or copy its annotations. Researchers can select an earlier batch to review its saved coding, progress, and comparisons. Only the current batch accepts saves. Exports include every saved batch and identify each row with `batch_id`, `coding_batch`, `batch_active`, and `start_participant`.
 - All annotation saves and code edits create history entries. CSV exports use current code labels; the JSON history retains earlier definitions and annotation versions.
 - Progress includes all imported response slots, including blanks, so the denominator is 5,264 for this dataset. The initial reading queue contains 5,075 nonblank responses. “NA” and similar participant-entered strings are retained as text for a researcher to classify.
 
@@ -128,12 +134,13 @@ Import is idempotent: repeating an unchanged import does not duplicate responses
 ## Export and data model
 
 - `responses`: immutable imported text and selected source metadata, keyed by analysis response key plus prompt.
-- `annotations`: one current annotation per response/account, with status and version.
+- `coding_batches`: named coding passes with one current batch and an optional starting participant.
+- `annotations`: one current annotation per response/account/batch, with status and version.
 - `codes`: shared draft/active/retired definitions with stable IDs and versions.
 - `history`: previous saved annotations and code edits.
 - `users` / `sessions`: account and session records.
 
-**Export my annotations** and **Export team annotations** include only saved annotations, not every unread response. They include source keys so they can be joined back to the harmonized CSV. Code IDs and names are JSON arrays in CSV cells to avoid delimiter ambiguity. Exports neutralize formula-like strings by prefixing an apostrophe for spreadsheet safety; the database retains the original text exactly. The revision-history JSON is an audit export, not a database backup.
+**Export my annotations** and **Export team annotations** include only saved annotations, not every unread response. They include the coding batch and source keys so rows can be separated by coding pass and joined back to the harmonized CSV. Code IDs and names are JSON arrays in CSV cells to avoid delimiter ambiguity. Exports neutralize formula-like strings by prefixing an apostrophe for spreadsheet safety; the database retains the original text exactly. The revision-history JSON is an audit export, not a database backup.
 
 ## Verification
 
@@ -141,7 +148,7 @@ Import is idempotent: repeating an unchanged import does not duplicate responses
 npm test
 ```
 
-Tests use temporary synthetic data and exercise imports, exact text preservation, source-change rollback, authentication, CSRF/origin checks, separate coder annotations, conflicting saves, excerpt validation, code permissions, filters, account creation, logout, and exports. Browser checks cover the reading and codebook flows and responsive layouts. Docker deployment and your server's proxy configuration must still be verified on the actual server.
+Tests use temporary synthetic data and exercise imports, exact text preservation, source-change rollback, authentication, CSRF/origin checks, separate coder and batch annotations, batch rotation and preservation, conflicting saves, excerpt validation, code permissions, filters, account creation, logout, and exports. Browser checks cover the reading and codebook flows and responsive layouts. Docker deployment and your server's proxy configuration must still be verified on the actual server.
 
 ## Render deployment
 
@@ -149,7 +156,7 @@ Tests use temporary synthetic data and exercise imports, exact text preservation
 
 ## Compare coders
 
-Administrators have a **Compare coders** navigation section backed by `GET /api/comparison`. It reads the current database directly, parses each saved annotation payload, resolves code IDs against the shared codebook, and displays the response beside each researcher’s username, labels, response type, and observations. An administrator can edit an existing saved reading from this view, including its status, labels, response type, and observations. The participant's original response text remains immutable. Corrections use optimistic version checks and create `annotation_admin_edit` revision-history entries naming the affected coder and the administrator who made the change. On Render this uses the live persistent database; local preview uses its configured database. No history upload, manual username map, or database migration is needed.
+Administrators have a **Compare coders** navigation section backed by `GET /api/comparison`. It compares the batch currently selected in the reading queue, parses each saved annotation payload, resolves code IDs against the shared codebook, and displays the response beside each researcher’s username, labels, response type, and observations. An administrator can edit an existing saved reading in the current batch; earlier batches are read-only. The participant's original response text remains immutable. Corrections use optimistic version checks and create `annotation_admin_edit` revision-history entries naming the batch, affected coder, and administrator. On Render this uses the live persistent database; local preview uses its configured database.
 
 Completed readings are compared by default; the provisional option includes draft and flagged readings. Administrators can include or exclude individual coders from the comparison, and the response list, summary counts, field highlighting, and disagreement labels are recalculated from only the selected coders. At least two eligible readings are required. Disagreement means unequal code-ID sets in Behavior, Anticipated interpersonal consequence, Who, or Setting, or different response types. Code selection order does not matter. Differing fields and labels receive amber highlighting and explicit text. Free-text Observations differences are called out for review, not scored as label disagreements.
 
@@ -165,4 +172,4 @@ node comparison.mjs /path/to/coding.sqlite --include-drafts > provisional-report
 
 These reports contain research data; keep them with research outputs, not in the source repository.
 
-Deployment note: include `comparison.mjs`, `server.mjs`, `public/app.js`, `public/index.html`, `public/style.css`, the updated Dockerfile, and tests. Existing databases require no migration. The October 5 local implementation was tested with the supplied history in an isolated preview: one response disagrees across two completed readings; six responses lack two completed readings. Published to GitHub main and Render on October 6, 2026 (UTC), final commit ab7ae617d423543c00dccd337d5bae1a04f2609d. Render passed all 17 tests; the live health check passed and the comparison endpoint returned 401 without authentication. The deployed comparison markup was verified; a new sign-in is needed for post-deployment administrator UI inspection.
+On startup, an existing database is migrated automatically: all current annotations are assigned to the preserved **Initial coding** batch, and subsequent batches use a three-part response/coder/batch key. Back up the database before deploying a schema change. Render runs the same migration against its persistent database during deployment.
