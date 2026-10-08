@@ -98,7 +98,8 @@ test('v2 label consolidation keeps stable primary IDs and migrates saved assignm
   const question=addV2('Asking a question','Participating publicly');
   const locallyRevised=addV2('Introducing oneself','Making social connections',2,'active');
   db.prepare('INSERT INTO responses VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run('response-1','record-1','person-1','P001',1,'general_self_approach','general','self','approach','test','psych','test',1,'Example response',0);
-  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?)').run('response-1',author,'draft',JSON.stringify({response_quality:'substantive',dimensions:{behavior:{codes:[joining,approaching,opinion,question]}},memos:{}}),1,'test');
+  const batchId=db.prepare('SELECT id FROM coding_batches WHERE active=1').get().id;
+  db.prepare('INSERT INTO annotations(response_id,user_id,batch_id,status,payload,version,updated) VALUES (?,?,?,?,?,?,?)').run('response-1',author,batchId,'draft',JSON.stringify({response_quality:'substantive',dimensions:{behavior:{codes:[joining,approaching,opinion,question]}},memos:{}}),1,'test');
 
   const result=seedStarterCodebook(db,author);
   assert.ok(result.revised >= 2);

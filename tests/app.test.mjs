@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDB, importCSV, parseCSV, PROMPTS, addUser, csvExport } from '../model.mjs';
 import { createApp } from '../server.mjs';
 
-const fixture = (key='test-record', text='I said "no",\nand stayed home.') => ({ analysis_response_key:key, participant_key:'person-one', survey_source:'test source', pool:'psych', collection_wave_verified:'2026_Q1', response_complete:'1', ...Object.fromEntries(PROMPTS.map((p,i) => [p.id, i === 1 ? '' : text])) });
+const fixture = (key='test-record', text='I said "no",\nand stayed home.', participantKey='person-one') => ({ analysis_response_key:key, participant_key:participantKey, survey_source:'test source', pool:'psych', collection_wave_verified:'2026_Q1', response_complete:'1', ...Object.fromEntries(PROMPTS.map((p,i) => [p.id, i === 1 ? '' : text])) });
 function writeCSV(path, rows) {
   const fields = Object.keys(rows[0]), quote = s => '"' + String(s).replaceAll('"','""') + '"';
   writeFileSync(path, [fields,...rows.map(r => fields.map(f => r[f]))].map(row => row.map(quote).join(',')).join('\r\n'));
@@ -53,6 +54,25 @@ test('CSV import preserves multiline text, blank answers, IDs and is idempotent'
 test('changed source is rejected atomically, preserving original responses',()=>{
  const s=setup();try{writeCSV(s.file,[fixture('new-record'),fixture('test-record','Changed text')]);assert.throws(()=>importCSV(s.db,s.file),/changed/);assert.equal(s.db.prepare('SELECT count(*) n FROM responses').get().n,8);}finally{s.close();}
 });
+test('opening a legacy database assigns every existing annotation to Initial coding',()=>{
+ const folder=mkdtempSync(join(tmpdir(),'risk-coding-legacy-')),path=join(folder,'legacy.sqlite');let legacy=new DatabaseSync(path);
+ try{
+  legacy.exec(`
+   CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, name TEXT NOT NULL, password TEXT NOT NULL, role TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
+   CREATE TABLE responses (id TEXT PRIMARY KEY, record_key TEXT NOT NULL, participant_key TEXT NOT NULL, participant_label TEXT NOT NULL, record_number INTEGER NOT NULL, prompt TEXT NOT NULL, domain TEXT NOT NULL, perspective TEXT NOT NULL, direction TEXT NOT NULL, source TEXT NOT NULL, pool TEXT NOT NULL, wave TEXT NOT NULL, complete INTEGER NOT NULL, text TEXT NOT NULL, blank INTEGER NOT NULL);
+   CREATE TABLE annotations (response_id TEXT NOT NULL REFERENCES responses(id), user_id INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL, payload TEXT NOT NULL, version INTEGER NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(response_id,user_id));
+   INSERT INTO users VALUES (1,'legacy','Legacy coder','hash','coder',1);
+   INSERT INTO responses VALUES ('legacy-response','legacy-record','legacy-person','P001',1,'general_self_approach','general','self','approach','source','pool','wave',1,'Legacy text',0);
+   INSERT INTO annotations VALUES ('legacy-response',1,'complete','{"response_quality":"substantive","dimensions":{},"memos":{}}',3,'2026-01-01T00:00:00.000Z');
+  `);legacy.close();legacy=null;
+  const migrated=openDB(path);try{
+   assert.deepEqual({...migrated.prepare('SELECT name,active FROM coding_batches').get()},{name:'Initial coding',active:1});
+   const saved=migrated.prepare('SELECT a.response_id,a.version,b.name batch FROM annotations a JOIN coding_batches b ON b.id=a.batch_id').get();
+   assert.deepEqual({...saved},{response_id:'legacy-response',version:3,batch:'Initial coding'});
+   assert.deepEqual(migrated.prepare('PRAGMA foreign_key_check').all(),[]);
+  }finally{migrated.close();}
+ }finally{legacy?.close();rmSync(folder,{recursive:true,force:true});}
+});
 test('protected data, production preview and cross-origin requests are denied',async()=>{
  const s=setup();try{assert.equal((await s.request('/api/responses')).status,401);assert.equal((await s.request('/api/preview-login',{method:'POST',body:{}})).status,403);assert.equal((await s.request('/api/login',{method:'POST',body:{username:'admin',password:'administrator-test-password'},origin:'http://evil.example'})).status,403);assert.equal((await s.request('/data/coding.sqlite')).status,404);}finally{s.close();}
 });
@@ -80,6 +100,31 @@ test('RAs may propose drafts; only admins may approve or change another coder’
 });
 test('filters distinguish blank/unread/complete and escape literal search',async()=>{
  const s=setup();try{const a=await s.login('coder-a','coder-a-test-password');assert.equal((await s.request('/api/responses',a)).data.total,7);assert.equal((await s.request('/api/responses?blanks=1',a)).data.total,8);assert.equal((await s.request('/api/responses?domain=social&perspective=other',a)).data.total,2);assert.equal((await s.request('/api/responses?q=%25',a)).data.total,0);const data=annotation();data.status='complete';await s.request('/api/annotation/test-record:general_self_approach',{...a,method:'PUT',body:data});assert.equal((await s.request('/api/responses?status=complete',a)).data.total,1);}finally{s.close();}
+});
+test('a new coding batch preserves the prior pass and can start at a different participant',async()=>{
+ const s=setup();try{
+  writeCSV(s.file,[fixture(),fixture('second-record','A second response.','person-two')]);importCSV(s.db,s.file);
+  const admin=await s.login('admin','administrator-test-password'),coder=await s.login('coder-a','coder-a-test-password');
+  const oldBatch=(await s.request('/api/batches',coder)).data.active_batch_id;
+  assert.equal((await s.request('/api/annotation/test-record:general_self_approach',{...coder,method:'PUT',body:annotation('First-pass reading')})).status,200);
+  assert.equal((await s.request('/api/batches',{...coder,method:'POST',body:{name:'Coder-created'}})).status,403);
+  const created=await s.request('/api/batches',{...admin,method:'POST',body:{name:'Recode after label revision',start_participant:'P002'}});
+  assert.equal(created.status,200);assert.equal(created.data.start_record_number,2);
+  const fresh=(await s.request(`/api/responses?batch=${created.data.id}`,coder)).data;
+  assert.equal(fresh.responses[0].participant_label,'P002');assert.equal(fresh.responses[0].status,'unread');
+  assert.ok(fresh.responses.findIndex(row=>row.participant_label==='P001')>0);
+  const newDetail=(await s.request(`/api/response/test-record:general_self_approach?batch=${created.data.id}`,coder)).data;
+  assert.equal(newDetail.annotation.version,0);
+  const second=annotation('Second-pass reading');second.batch_id=created.data.id;
+  assert.equal((await s.request('/api/annotation/test-record:general_self_approach',{...coder,method:'PUT',body:second})).status,200);
+  const oldDetail=(await s.request(`/api/response/test-record:general_self_approach?batch=${oldBatch}`,coder)).data;
+  assert.equal(oldDetail.annotation.payload.dimensions.situation.note,'First-pass reading');assert.equal(oldDetail.batch.active,0);
+  const rejected=annotation('Do not overwrite');rejected.batch_id=oldBatch;rejected.version=1;
+  assert.equal((await s.request('/api/annotation/test-record:general_self_approach',{...coder,method:'PUT',body:rejected})).status,409);
+  assert.equal(s.db.prepare('SELECT count(*) n FROM annotations WHERE response_id=? AND user_id=?').get('test-record:general_self_approach',s.db.prepare("SELECT id FROM users WHERE username='coder-a'").get().id).n,2);
+  const exported=parseCSV((await s.request('/api/export',coder)).output);
+  assert.deepEqual(new Set(exported.map(row=>row.coding_batch)),new Set(['Initial coding','Recode after label revision']));
+ }finally{s.close();}
 });
 test('team exports are admin-only; personal CSV roundtrips notes and protects formula cells',async()=>{
  const s=setup();try{const a=await s.login('coder-a','coder-a-test-password');await s.request('/api/annotation/test-record:general_self_approach',{...a,method:'PUT',body:annotation('=SUM(1,2)')});assert.equal((await s.request('/api/export?all=1',a)).status,403);assert.equal((await s.request('/api/team',a)).status,403);assert.equal((await s.request('/api/export?kind=history',a)).status,403);const csv=await s.request('/api/export',a);const parsed=parseCSV(csv.output);assert.equal(parsed.length,1);assert.equal(parsed[0].situation_note,"'=SUM(1,2)");assert.equal(parsed[0].text,fixture().general_self_approach);assert.match(csvExport([{text:'@formula'}],['text']),/'@formula/);}finally{s.close();}
