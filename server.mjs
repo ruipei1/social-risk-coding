@@ -266,7 +266,7 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
         }
         throw failure(404, 'API route not found.');
       }
-      const assets = { '/': ['index.html','text/html'], '/app.js': ['app.js','text/javascript'], '/memos.js': ['memos.js','text/javascript'], '/style.css': ['style.css','text/css'], '/favicon.svg': ['favicon.svg','image/svg+xml'] };
+      const assets = { '/': ['index.html','text/html'], '/app.js': ['app.js','text/javascript'], '/selections.js': ['selections.js','text/javascript'], '/memos.js': ['memos.js','text/javascript'], '/style.css': ['style.css','text/css'], '/favicon.svg': ['favicon.svg','image/svg+xml'] };
       const asset = assets[path]; check(req.method === 'GET' && asset, 'Page not found.', 404);
       res.writeHead(200, { 'Content-Type': asset[1] + '; charset=utf-8' }); res.end(readFileSync(join(ROOT, 'public', asset[0])));
     } catch (error) {
