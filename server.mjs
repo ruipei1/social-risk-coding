@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { DIMENSIONS, ALL_DIM_IDS, PROMPTS, openDB, hash, timestamp, passwordMatches, passwordHash, addUser, transaction, csvExport } from './model.mjs';
 import { seedStarterCodebook } from './starter-codebook.mjs';
+import { CODEBOOK_VERSION, BEHAVIOR_CODES } from './behavior-vocabulary.mjs';
+import { codebookReport, resolveBehaviorReview } from './behavior-migration.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const failure = (status, message) => Object.assign(new Error(message), { status });
@@ -46,9 +48,13 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
     if (writable) check(batch.active === 1, 'Past coding batches are read-only. Switch to the current batch to save changes.', 409);
     return batch;
   }
+  function reviewsFor(responseId,userId,batchId) {
+    if (!db.prepare("SELECT name FROM sqlite_master WHERE name='behavior_reviews'").get()) return [];
+    return db.prepare('SELECT legacy_code_id,legacy_name,reason FROM behavior_reviews WHERE response_id=? AND user_id=? AND batch_id=? AND resolved_at IS NULL').all(responseId,userId,batchId);
+  }
   function annotation(responseId, userId, batchId) {
     const saved = db.prepare('SELECT * FROM annotations WHERE response_id=? AND user_id=? AND batch_id=?').get(responseId, userId, batchId);
-    if (saved) return { ...saved, payload: JSON.parse(saved.payload) };
+    if (saved) return { ...saved, payload: JSON.parse(saved.payload), migration_reviews: reviewsFor(responseId,userId,batchId) };
     const unspecified = db.prepare("SELECT id FROM codes WHERE dimension='who' AND name='Unspecified' AND status!='retired'").get();
     const dimensions = unspecified ? { who: { codes:[unspecified.id], note:'', quote:'', evidence:'unreviewed' } } : {};
     return { version: 0, status: 'unread', batch_id: batchId, payload: { dimensions, memos: {}, response_quality: 'substantive' } };
@@ -61,7 +67,11 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
       const item = payload.dimensions?.[d] ?? previous.dimensions?.[d] ?? {};
       const codes = item.codes || [];
       check(Array.isArray(codes) && codes.length <= 30 && codes.every(Number.isSafeInteger), 'Invalid codes.');
-      for (const id of codes) check(db.prepare('SELECT id FROM codes WHERE id=? AND dimension=?').get(id, d), 'Code does not belong to this dimension.');
+      for (const id of codes) {
+        const code=db.prepare('SELECT id,status FROM codes WHERE id=? AND dimension=?').get(id,d);
+        check(code, 'Code does not belong to this dimension.');
+        if(d==='behavior' && code.status==='retired') check((previous.dimensions?.behavior?.codes || []).includes(id), 'Retired behaviors cannot be newly selected.');
+      }
       const evidence = item.evidence || 'unreviewed';
       check(['unreviewed', 'explicit', 'inferred', 'not_stated', 'unclear', 'mixed'].includes(evidence), 'Invalid evidence status.');
       result.dimensions[d] = { note: str(item.note || ''), quote: str(item.quote || ''), evidence, codes: [...new Set(codes)] };
@@ -85,7 +95,7 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
     try {
       const url = new URL(req.url, origin), path = url.pathname;
       if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) check(req.headers.origin === origin, 'Request origin does not match APP_ORIGIN.', 403);
-      if (req.method === 'GET' && path === '/health') return json({ ok: true });
+      if (req.method === 'GET' && path === '/health') return json({ ok: true, codebook_version: CODEBOOK_VERSION, commit: process.env.RENDER_GIT_COMMIT || null });
       if (req.method === 'GET' && path === '/api/session') {
         const user = session(req);
         return json({ user: user ? { id: user.id, username: user.username, name: user.name, role: user.role } : null, csrf: user?.csrf, preview, dimensions: DIMENSIONS, prompts: PROMPTS });
@@ -115,10 +125,13 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
         const user = session(req); check(user, 'Please sign in to continue.', 401);
         if (req.method !== 'GET') check(req.headers['x-csrf-token'] === user.csrf, 'Session verification failed. Sign in again.', 403);
         const admin = () => check(user.role === 'admin', 'Administrator access required.', 403);
+        if (req.method === 'POST' && path === '/api/behavior-migration/resolve') { admin(); const input=await body(req); try{return json(resolveBehaviorReview(db,user.id,input));}catch(e){throw failure(409,e.message);} }
+        if (req.method === 'GET' && path === '/api/behavior-migration') { admin(); return json(codebookReport(db)); }
+        if (req.method === 'GET' && path === '/api/codebook-version') return json({version:CODEBOOK_VERSION,behaviors:db.prepare("SELECT name,definition,include_rule,exclude_rule,example,family FROM codes WHERE dimension='behavior' AND status!='retired' ORDER BY name").all()});
         if (req.method === 'POST' && path === '/api/logout') {
           db.prepare('DELETE FROM sessions WHERE token=?').run(hash(/coding_session=([a-f0-9]+)/.exec(req.headers.cookie)?.[1] || ''));
           res.setHeader('Set-Cookie', 'coding_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
-          return json({ ok: true });
+          return json({ ok: true, codebook_version: CODEBOOK_VERSION, commit: process.env.RENDER_GIT_COMMIT || null });
         }
         if (req.method === 'GET' && path === '/api/batches') {
           const batches = db.prepare(`
@@ -200,6 +213,7 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
         if ((req.method === 'POST' || req.method === 'PUT') && /^\/api\/codes(?:\/\d+)?$/.test(path)) {
           const input = await body(req), id = req.method === 'PUT' ? Number(path.split('/').pop()) : null;
           check(DIM_IDS.includes(input.dimension), 'Invalid dimension.');
+          check(input.dimension !== 'behavior', 'The 19 behavior labels and definitions are versioned and fixed. Use Other behavior with an observation for an uncovered action.', 403);
           input.status ??= 'draft';
           const name = str(input.name, 100).trim(), definition = str(input.definition || '');
           check(name, 'A code name is required.');
@@ -304,9 +318,11 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
           const rows = db.prepare(`SELECT b.id batch_id,b.name coding_batch,b.active batch_active,b.start_participant,r.record_key,r.participant_key,r.participant_label,r.prompt,r.source,r.pool,r.wave,r.complete survey_complete,r.text,u.username coder,a.status,a.payload,a.version,a.updated FROM annotations a JOIN coding_batches b ON b.id=a.batch_id JOIN responses r ON r.id=a.response_id JOIN users u ON u.id=a.user_id ${all ? '' : 'WHERE a.user_id=?'} ORDER BY b.id,r.record_number,r.rowid,u.id`).all(...(all ? [] : [user.id]));
           const fields = ['batch_id','coding_batch','batch_active','start_participant','record_key','participant_key','participant_label','prompt','source','pool','wave','survey_complete','text','coder','status','response_quality','version','updated'];
           for (const d of ALL_DIM_IDS) fields.push(`${d}_note`, `${d}_code_ids`, `${d}_code_names`, `${d}_quote`, `${d}_evidence`);
+          fields.push('behavior_migration_reviews');
           fields.push('memo_observations','memo_at_stake','memo_unstated','memo_context','memo_reflection');
           const codeMap = new Map(db.prepare('SELECT id,name FROM codes').all().map(c => [c.id, c.name]));
           for (const row of rows) {
+            row.behavior_migration_reviews=JSON.stringify(reviewsFor(row.record_key+':'+row.prompt,db.prepare('SELECT id FROM users WHERE username=?').get(row.coder).id,row.batch_id));
             const payload = JSON.parse(row.payload); row.response_quality = payload.response_quality;
             for (const d of ALL_DIM_IDS) { const v = payload.dimensions?.[d] || {note:'',codes:[],quote:'',evidence:'unreviewed'}; row[`${d}_note`] = v.note; row[`${d}_code_ids`] = JSON.stringify(v.codes); row[`${d}_code_names`] = JSON.stringify(v.codes.map(id => codeMap.get(id))); row[`${d}_quote`] = v.quote; row[`${d}_evidence`] = v.evidence; }
             for (const [key, val] of Object.entries(payload.memos)) row['memo_' + key] = val;
@@ -317,7 +333,7 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
         }
         throw failure(404, 'API route not found.');
       }
-      const assets = { '/': ['index.html','text/html'], '/app.js': ['app.js','text/javascript'], '/selections.js': ['selections.js','text/javascript'], '/memos.js': ['memos.js','text/javascript'], '/style.css': ['style.css','text/css'], '/favicon.svg': ['favicon.svg','image/svg+xml'] };
+      const assets = { '/migration-review': ['migration.html','text/html'], '/migration.js':['migration.js','text/javascript'], '/': ['index.html','text/html'], '/app.js': ['app.js','text/javascript'], '/selections.js': ['selections.js','text/javascript'], '/memos.js': ['memos.js','text/javascript'], '/style.css': ['style.css','text/css'], '/favicon.svg': ['favicon.svg','image/svg+xml'] };
       const asset = assets[path]; check(req.method === 'GET' && asset, 'Page not found.', 404);
       res.writeHead(200, { 'Content-Type': asset[1] + '; charset=utf-8' }); res.end(readFileSync(join(ROOT, 'public', asset[0])));
     } catch (error) {
@@ -337,7 +353,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const seedAuthor = db.prepare("SELECT id FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1").get();
   if (seedAuthor) {
     const seeded = seedStarterCodebook(db, seedAuthor.id);
-    if (seeded.added || seeded.revised || seeded.retired || seeded.annotations_migrated) console.log('Starter codebook synchronized:', seeded);
+    console.log('Codebook:', {version:CODEBOOK_VERSION,already_applied:!!seeded.already_applied,selectable:BEHAVIOR_CODES.length,review_assignments:seeded.review_assignments});
   }
   const server = http.createServer({ requestTimeout: 30000, headersTimeout: 15000 }, handler);
   server.listen(port, host, () => console.log(`Social Risk Coding: ${origin}${preview ? ' (local preview)' : ''}`));

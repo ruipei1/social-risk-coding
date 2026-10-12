@@ -36,15 +36,13 @@ const code = (name='Boundary setting') => ({dimension:'who',name,definition:'A d
 test('a name-only code enters the shared dimension pool without annotating a response', async () => {
  const s=setup();try {
    const a=await s.login('coder-a','coder-a-test-password'), b=await s.login('coder-b','coder-b-test-password');
-   const created=await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'Setting a limit',family:'Setting boundaries or leaving'}});
-   assert.equal(created.status,200);
-   const saved=(await s.request('/api/codes',b)).data.find(c=>c.id===created.data.id);
-   assert.equal(saved.family,'Setting boundaries or leaving'); assert.equal(saved.name,'Setting a limit'); assert.equal(saved.dimension,'behavior'); assert.equal(saved.definition,'');
+   const created=await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'Setting a limit'}});
+   assert.equal(created.status,403);
    const consequence=await s.request('/api/codes',{...a,method:'POST',body:{dimension:'anticipated_interpersonal_consequence',name:'Embarrassment'}});
    assert.equal(consequence.status,200);
    assert.equal((await s.request('/api/codes',b)).data.find(c=>c.id===consequence.data.id).name,'Embarrassment');
    assert.equal(s.db.prepare('SELECT count(*) n FROM annotations').get().n,0);
-   assert.equal((await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'  '}})).status,400);
+   assert.equal((await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'  '}})).status,403);
  } finally {s.close();}
 });
 
@@ -161,7 +159,8 @@ test('comparison is admin-only and distinguishes disagreements from missing read
   const a=await s.login('coder-a','coder-a-test-password'), b=await s.login('coder-b','coder-b-test-password'), admin=await s.login('admin','administrator-test-password');
   assert.equal((await s.request('/api/comparison')).status,401);
   assert.equal((await s.request('/api/comparison',a)).status,403);
-  const c=await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'Taking a class',family:'Learning'}});
+  const behaviorId=Number(s.db.prepare("INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated,family) VALUES ('behavior','Taking on a new or challenging activity','','','','','active',1,1,'test','')").run().lastInsertRowid);
+  const c={data:{id:behaviorId}};
   const one=annotation();one.status='complete';one.payload.dimensions.behavior={codes:[c.data.id]};
   const id='test-record:general_self_approach';
   assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:one})).status,200);
@@ -173,7 +172,7 @@ test('comparison is admin-only and distinguishes disagreements from missing read
   assert.equal(result.total,1);assert.equal(result.rows[0].fields.behavior.differs,true);
   assert.equal(result.rows[0].missing,1);assert.deepEqual(result.rows[0].fields.behavior.differingIds,[c.data.id]);
   const coderA=result.rows[0].readings.find(r=>r.username==='coder-a');
-  assert.equal(coderA.dimensions.behavior[0].name,'Taking a class');
+  assert.equal(coderA.dimensions.behavior[0].name,'Taking on a new or challenging activity');
   const coderB=result.rows[0].readings.find(r=>r.username==='coder-b');
   const selected=(await s.request(`/api/comparison?coders=${coderA.coder_id},${coderB.coder_id}`,admin)).data;
   assert.deepEqual(selected.selectedCoderIds,[coderA.coder_id,coderB.coder_id]);assert.equal(selected.rows[0].readings.length,2);assert.equal(selected.rows[0].result,'disagreement');
@@ -194,4 +193,15 @@ test('comparison is admin-only and distinguishes disagreements from missing read
   assert.equal((await s.request('/api/comparison?q=doesnotexist',admin)).data.total,0);
   assert.equal((await s.request('/api/comparison?offset=-1',admin)).status,400);
  } finally {s.close();}
+});
+
+test('behavior edit and retired reintroduction are blocked; current legacy assignments survive ordinary saves',async()=>{
+ const s=setup();try{const admin=await s.login('admin','administrator-test-password'),coder=await s.login('coder-a','coder-a-test-password');
+ const id=Number(s.db.prepare("INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated) VALUES ('behavior','Old label','','','','','retired',1,1,'test')").run().lastInsertRowid);
+ assert.equal((await s.request('/api/codes/'+id,{...admin,method:'PUT',body:{dimension:'behavior',name:'Old label',version:1,status:'active'}})).status,403);
+ const a=annotation();a.payload.dimensions.behavior={codes:[id]};assert.equal((await s.request('/api/annotation/test-record:general_self_approach',{...coder,method:'PUT',body:a})).status,400);
+ s.db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?)').run('test-record:general_self_approach',2,1,'complete',JSON.stringify(a.payload),1,'test');
+ a.version=1;a.status='complete';assert.equal((await s.request('/api/annotation/test-record:general_self_approach',{...coder,method:'PUT',body:a})).status,200);
+ assert.equal((await s.request('/api/behavior-migration',coder)).status,403);
+ }finally{s.close();}
 });

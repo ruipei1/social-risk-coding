@@ -107,54 +107,23 @@ function renderResponse() {
   const quality = a.version === 0 && r.blank ? 'blank' : (a.payload.response_quality || 'substantive');
   $('#coding-fields').innerHTML = `<label class="quality">Response type<select id="response-quality">${[['substantive','Substantive response'],['no_example','No example recalled / not applicable'],['ambiguous','Too ambiguous to interpret'],['off_topic','Off topic'],['blank','Blank response']].map(([v,l]) => `<option value="${v}" ${quality === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>` + state.dimensions.map((d,i) => {
     const value = a.payload.dimensions?.[d.id] || {}, codes = value.codes || [];
-    return `<details class="dimension" data-dimension="${d.id}" open><summary><span class="dim-number">${String(i+1).padStart(2,'0')}</span><span class="dim-title">${esc(d.label)}</span><span class="dim-indicator">${codes.length ? codes.length + ' selected' : ''}</span><span class="dim-chevron">›</span></summary><div class="dimension-body"><p>${esc(d.help)}</p><div class="chips" data-chips="${d.id}">${renderChips(codes)}</div>${d.id === 'behavior' ? '<label>Broad category<select id="behavior-family" aria-label="Behavior category"><option value="">Choose a category…</option></select></label>' : ''}<div class="code-row"><select data-pick-code="${d.id}" aria-label="Apply a ${esc(d.label.toLowerCase())} code">${codeOptions(d.id, codes)}</select><button class="quiet" data-propose="${d.id}">+ New code</button></div></div></details>`;
+    return `<details class="dimension" data-dimension="${d.id}" open><summary><span class="dim-number">${String(i+1).padStart(2,'0')}</span><span class="dim-title">${esc(d.label)}</span><span class="dim-indicator">${codes.length ? codes.length + ' selected' : ''}</span><span class="dim-chevron">›</span></summary><div class="dimension-body"><p>${esc(d.help)}</p><div class="chips" data-chips="${d.id}">${renderChips(codes)}</div><div class="code-row"><select data-pick-code="${d.id}" aria-label="Apply a ${esc(d.label.toLowerCase())} code">${codeOptions(d.id, codes)}</select>${d.id === 'behavior' ? '' : `<button class="quiet" data-propose="${d.id}">+ New code</button>`}</div></div></details>`;
   }).join('');
   updateCategoryGuides();
+  if(a.migration_reviews?.length) $('#coding-fields').insertAdjacentHTML('afterbegin', `<aside class="migration-warning"><strong>Vocabulary migration review</strong><p>Your reading status has not changed. Legacy selections are preserved pending review.</p><ul>${a.migration_reviews.map(x=>`<li>${esc(x.legacy_name)}: ${esc(x.reason)}</li>`).join('')}</ul></aside>`);
   statusPill(a.status); setSave(a.updated ? 'Saved ' + new Date(a.updated).toLocaleString() : 'Your notes save automatically as you write');
   $('#source-panel').scrollTop = 0; $('#coding-fields').scrollTop = 0;
 }
-function renderChips(ids) { return ids.map(id => { const code = state.codes.find(c => c.id === id); return `<span class="chip" data-code-id="${id}">${esc(code?.name || 'Code ' + id)}<button data-remove-code="${id}" aria-label="Remove ${esc(code?.name)}">×</button></span>`; }).join(''); }
+function renderChips(ids) { return ids.map(id => { const code = state.codes.find(c => c.id === id); return `<span class="chip" data-code-id="${id}">${esc(code?.name || 'Code ' + id)}${code?.status==='retired'?' · legacy / review':''}<button data-remove-code="${id}" aria-label="Remove ${esc(code?.name)}">×</button></span>`; }).join(''); }
 function codeOptions(dimension, selected = []) {
-  const codes = state.codes.filter(c => c.dimension === dimension && c.status !== 'retired' && !selected.includes(c.id));
-  const option = c => `<option value="${c.id}">${esc(c.name)}</option>`;
-  if (dimension !== 'behavior') return '<option value="">Choose a code…</option>' + codes.map(option).join('');
-  const family = $('#behavior-family')?.value;
-  if (!family) return '<option value="">Choose a category first…</option>';
-  const items = codes.filter(c => (c.family || 'Additional behaviors') === family);
-  return `<option value="">${items.length ? 'Choose a specific behavior…' : 'All items in this category selected'}</option>` + items.map(option).join('');
+  return '<option value="">Choose a code…</option>' + state.codes.filter(c=>c.dimension===dimension && c.status!=='retired' && !selected.includes(c.id)).map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('');
 }
-function updateBehaviorFamilies() {
-  const picker = $('#behavior-family');
-  if (!picker) return;
-  const selected = picker.value;
-  const families = [...new Set(state.codes.filter(c => c.dimension === 'behavior' && c.status !== 'retired').map(c => c.family || 'Additional behaviors'))].sort();
-  picker.innerHTML = '<option value="">Choose a category…</option>' + families.map(f => `<option value="${esc(f)}">${esc(f)}</option>`).join('');
-  if (families.includes(selected)) picker.value = selected;
-  updateBehaviorPicker();
-}
-function updateBehaviorPicker() {
-  const picker = $('[data-pick-code="behavior"]');
-  if (!picker) return;
-  picker.disabled = !$('#behavior-family').value;
-  picker.innerHTML = codeOptions('behavior', selectedCodes('behavior'));
-  $('[data-propose="behavior"]').disabled = false;
-}
-
 function updateCategoryGuides() {
-  updateBehaviorFamilies();
-  for (const d of state.dimensions) {
-    const body = $(`[data-dimension="${d.id}"] .dimension-body`);
-    if (!body) continue;
-    const codes = state.codes.filter(c => c.dimension === d.id && c.status !== 'retired');
-    let guide = $('.category-guide', body);
-    if (!guide) { guide = document.createElement('details'); guide.className = 'category-guide'; $('p', body).after(guide); }
-    const entry = c => `<section><h3>${esc(c.name)}</h3>${c.definition ? `<p>${esc(c.definition)}</p>` : ''}</section>`;
-    const families = [...new Set(codes.map(c => c.family || 'Additional behaviors'))].sort();
-    const contents = d.id === 'behavior'
-      ? families.map(f => `<details class="behavior-guide-group"><summary>${esc(f)}</summary>${codes.filter(c => (c.family || 'Additional behaviors') === f).map(entry).join('')}</details>`).join('')
-      : codes.map(entry).join('');
-    guide.innerHTML = `<summary>${d.id === 'behavior' ? 'Browse behavior categories' : 'Category guide'}</summary><div class="category-guide-content">${contents || '<p>No categories yet.</p>'}</div>`;
-  }
+ for(const d of state.dimensions){
+  const body=$(`[data-dimension="${d.id}"] .dimension-body`); if(!body)continue;
+  let guide=$('.category-guide',body);if(!guide){guide=document.createElement('details');guide.className='category-guide';$('p',body).after(guide);}
+  guide.innerHTML=`<summary>${d.id==='behavior'?'Behavior label guide':'Category guide'}</summary><div class="category-guide-content">${state.codes.filter(c=>c.dimension===d.id&&c.status!=='retired').map(c=>`<section><h3>${esc(c.name)}</h3><p>${esc(c.definition)}</p>${c.include_rule?`<p>Include: ${esc(c.include_rule)}</p>`:''}${c.exclude_rule?`<p>Exclude: ${esc(c.exclude_rule)}</p>`:''}</section>`).join('')}</div>`;
+ }
 }
 function selectedCodes(dimension) { return $$(`[data-chips="${dimension}"] [data-code-id]`).map(el => Number(el.dataset.codeId)); }
 function payload() {
@@ -205,36 +174,22 @@ async function loadCodes() {
 }
 function renderCodebook() {
   const dimension = $('#codebook-dimension').value;
-  $('#new-code').disabled = !dimension;
+  $('#new-code').disabled = !dimension || dimension === 'behavior';
   $('#new-code').title = dimension ? 'Add a code to this dimension' : 'Select a dimension first';
   const codes = state.codes.filter(c => state.dimensions.some(d => d.id === c.dimension) && (!dimension || c.dimension === dimension) && c.status !== 'retired');
-  $('#codebook-list').innerHTML = codes.length ? codes.map(c => `<article class="code-card"><div class="code-card-top"><p class="eyebrow">${esc(state.dimensions.find(d => d.id === c.dimension)?.label)}</p></div><h2>${esc(c.name)}</h2>${c.family ? `<p class="muted small">${esc(c.family)}</p>` : ''}<p>${esc(c.definition)}</p><dl>${[['include_rule','Include when'],['exclude_rule','Exclude when'],['example','Example / boundary case']].filter(([f]) => c[f]).map(([f,l]) => `<dt>${l}</dt><dd>${esc(c[f])}</dd>`).join('')}</dl><footer><span>${esc(c.author)} · version ${c.version}</span>${state.user.role === 'admin' || (c.author_id === state.user.id && c.status === 'draft') ? `<button class="quiet" data-edit-code="${c.id}">Rename</button>` : '<span>Shared code</span>'}</footer></article>`).join('') : `<div class="empty"><h3>${state.codes.length ? 'No codes match these filters.' : 'Let the responses shape the codebook.'}</h3><p>${state.codes.length ? 'Choose another dimension.' : 'Read a few responses, then add a code when a useful distinction appears.'}</p></div>`;
+  $('#codebook-list').innerHTML = codes.length ? codes.map(c => `<article class="code-card"><div class="code-card-top"><p class="eyebrow">${esc(state.dimensions.find(d => d.id === c.dimension)?.label)}</p></div><h2>${esc(c.name)}</h2><p>${esc(c.definition)}</p><dl>${[['include_rule','Include when'],['exclude_rule','Exclude when'],['example','Example / boundary case']].filter(([f]) => c[f]).map(([f,l]) => `<dt>${l}</dt><dd>${esc(c[f])}</dd>`).join('')}</dl><footer><span>${esc(c.author)} · version ${c.version}</span>${c.dimension !== 'behavior' && (state.user.role === 'admin' || (c.author_id === state.user.id && c.status === 'draft')) ? `<button class="quiet" data-edit-code="${c.id}">Rename</button>` : '<span>Shared code</span>'}</footer></article>`).join('') : `<div class="empty"><h3>${state.codes.length ? 'No codes match these filters.' : 'Let the responses shape the codebook.'}</h3><p>${state.codes.length ? 'Choose another dimension.' : 'Read a few responses, then add a code when a useful distinction appears.'}</p></div>`;
 }
 function openCode(dimension, id = null) {
   const form = $('#code-form'), code = state.codes.find(c => c.id === id);
   if (!code && !dimension) return notice('Choose a dimension in the codebook filter first, or use New code inside a reading dimension.');
   form.reset();
   form.elements.dimension.value = code?.dimension || dimension;
-  form.elements.family.value = code?.family || (dimension === 'behavior' && state.view === 'reading' ? $('#behavior-family')?.value || '' : '');
-  const newBehavior = !code && dimension === 'behavior';
-  $('#code-category-fields').hidden = !newBehavior;
-  $('#new-code-category').disabled = !newBehavior;
-  $('#new-code-category').required = newBehavior;
-  $('#new-category-label').hidden = true;
-  $('#new-category-name').disabled = true;
-  $('#new-category-name').required = false;
-  $('#code-name-label').textContent = form.elements.dimension.value === 'behavior' ? 'Behavior name' : 'Code name';
-  $('#code-family-label').textContent = code?.family ? 'Category: ' + code.family : '';
-  if (newBehavior) {
-    const families = [...new Set(state.codes.filter(c => c.dimension === 'behavior' && c.status !== 'retired').map(c => c.family || 'Additional behaviors'))].sort();
-    $('#new-code-category').innerHTML = '<option value="">Choose a category…</option>' + families.map(f => `<option value="${esc(f)}">${esc(f)}</option>`).join('') + '<option value="__new__">+ Add a new category</option>';
-    $('#new-code-category').value = form.elements.family.value;
-  }
+  if (form.elements.dimension.value === 'behavior') return notice('Behavior labels are fixed. Use Other behavior with a short observation.');
   $('#code-dimension-label').textContent = state.dimensions.find(d => d.id === form.elements.dimension.value)?.label;
   for (const field of ['id','version','name']) form.elements[field].value = code?.[field] ?? '';
   $('.form-error', form).textContent = ''; $('#code-dialog-title').textContent = code ? 'Rename code' : 'New code';
   $('#code-dialog').showModal();
-  if (newBehavior && !$('#new-code-category').value) $('#new-code-category').focus(); else form.elements.name.focus();
+  form.elements.name.focus();
 }
 async function changeView(view) {
   await flush(); state.view = view;
@@ -253,15 +208,6 @@ document.addEventListener('change', e => {
     if (!checked.length) { e.target.checked = true; return notice('Select at least one coder for comparison.'); }
     comparisonCoderIds = checked; comparisonOffset = 0; notice(); attempt(() => loadComparison()); return;
   }
-  if (e.target.id === 'new-code-category') {
-    const isNew = e.target.value === '__new__';
-    $('#new-category-label').hidden = !isNew;
-    $('#new-category-name').disabled = !isNew;
-    $('#new-category-name').required = isNew;
-    if (isNew) $('#new-category-name').focus();
-    return;
-  }
-  if (e.target.id === 'behavior-family') { updateBehaviorPicker(); return; }
   if (e.target.matches('#response-quality')) { edited(); const dim = e.target.closest('.dimension'); if (dim) $('.dim-indicator', dim).textContent = labels[e.target.value]; }
   if (e.target.matches('[data-pick-code]') && e.target.value) {
     const dimension = e.target.dataset.pickCode, picked = Number(e.target.value);
@@ -309,15 +255,8 @@ $('#code-form').onsubmit = async e => {
   try {
     const prior = state.codes.find(c => c.id === Number(form.elements.id.value));
     const values = { ...prior, ...Object.fromEntries(new FormData(form)) }; values.status = prior?.status || 'draft'; values.version = Number(values.version || 0);
-    if (!prior && values.dimension === 'behavior') {
-      values.family = ($('#new-code-category').value === '__new__' ? $('#new-category-name').value : $('#new-code-category').value).trim();
-      if (!values.family) throw new Error('Choose a broad category or enter a new category name.');
-      const existing = state.codes.find(c => c.dimension === 'behavior' && c.family?.toLowerCase() === values.family.toLowerCase());
-      if (existing) values.family = existing.family;
-    }
     const result = await api('/api/codes' + (values.id ? '/' + values.id : ''), { method:values.id ? 'PUT' : 'POST', body:JSON.stringify(values) });
     await loadCodes();
-    if (!prior && values.dimension === 'behavior' && $('#behavior-family')) { $('#behavior-family').value = values.family; updateBehaviorPicker(); }
     $('#code-dialog').close();
   } catch (error) { $('.form-error', form).textContent = error.message; } finally { submit.disabled = false; }
 };
@@ -382,7 +321,7 @@ function openComparisonEditor(responseId, coderId) {
   $('#comparison-edit-dimensions').innerHTML = state.dimensions.map(d => {
     const selected = new Set(reading.dimensions[d.id].map(c => c.id));
     const codes = state.codes.filter(c => c.dimension === d.id && (c.status !== 'retired' || selected.has(c.id)));
-    return `<fieldset class="comparison-edit-dimension"><legend>${esc(d.label)}</legend><p class="muted small">${esc(d.help)}</p><div class="comparison-edit-codes">${codes.map(c => `<label><input type="checkbox" name="codes_${d.id}" value="${c.id}" ${selected.has(c.id) ? 'checked' : ''}><span>${esc(c.name)}${c.family ? `<small>${esc(c.family)}</small>` : ''}${c.status === 'retired' ? '<small>Retired</small>' : ''}</span></label>`).join('') || '<p class="muted">No codes are available for this dimension.</p>'}</div></fieldset>`;
+    return `<fieldset class="comparison-edit-dimension"><legend>${esc(d.label)}</legend><p class="muted small">${esc(d.help)}</p><div class="comparison-edit-codes">${codes.map(c => `<label><input type="checkbox" name="codes_${d.id}" value="${c.id}" ${selected.has(c.id) ? 'checked' : ''}><span>${esc(c.name)}${c.status === 'retired' ? '<small>Legacy assignment · migration review</small>' : ''}</span></label>`).join('') || '<p class="muted">No codes are available for this dimension.</p>'}</div></fieldset>`;
   }).join('');
   $('.form-error', form).textContent = '';
   $('#comparison-edit-dialog').showModal();

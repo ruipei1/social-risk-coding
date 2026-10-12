@@ -1,179 +1,72 @@
 # Social Risk Coding Workspace
 
-A self-hostable application for reading the harmonized social-risk responses and developing a codebook. The form centers on Behavior, Anticipated interpersonal consequence, optional Who is involved and Setting codes, and one Observations box.
+## Current vocabulary: behavior-flat-v6
 
-## Start reading locally
+Behavior is a single, fixed list of 19 labels. Exact names, definitions, inclusion rules, and exclusion rules live in `behavior-vocabulary.mjs`; this is the authoritative versioned vocabulary. The reading selector, guide, codebook and administrator comparison editor show no higher-level behavior categories. Behavior names and definitions cannot be changed through the code API or UI. Use Other behavior with a short observation for a clearly described action outside the vocabulary. Consequences, people, settings, response type, and researcher-added nonbehavior labels remain unchanged and editable.
 
-The local preview runs at http://127.0.0.1:4317. Click **Open local workspace**. On this Mac, double-click `start-preview.command` to restart it after the current preview stops. Keep its terminal running. If another copy is already running, use the existing browser page instead of starting a second process.
+Code the action done, considered, or avoided independently of the survey's Approach/Avoid prompt. Nonparticipation is not automatically a refusal. Online communication and AI are media: code their stated function; otherwise use Other behavior. Public participation versus assistance-seeking, nonromantic invitations versus romantic initiation, and ordinary exercise versus challenge are explained in the label guide. Multiple labels require distinct stated actions.
 
-With Node.js 24.4 or later in the 24.x series:
+## Behavior migration and review
+
+`behavior-migration.mjs` inventories **every actual behavior record**, including edited, researcher-added and retired records. `seedStarterCodebook` invokes the v6 migration, never the earlier consolidation routines. Startup applies v6 before listening for requests. It is transactional and records the version only after success; rerunning an applied version leaves codebook, annotations and history unchanged.
+
+Before mutating a disk database the migration uses SQLite `VACUUM INTO` to create a consistent snapshot beside it, including committed WAL contents. The filename is unique, contains `before-behavior-flat-v6`, and has owner-only permissions. Backup failure aborts startup. This snapshot includes research data and account/session records: keep it private, copy it securely off-server, and never commit it to GitHub. The in-memory test database has no backup file.
+
+Superseded choices are retired; their IDs, names, definitions, and category metadata are retained. An existing record with an exact canonical name is reused, with its full previous definition and category saved to `code_before_flat_migration` history before adopting the canonical definition. All coder/batch selections are remapped and deduplicated. Each affected annotation gains a version and a history entry containing previous payload, new payload, mapping decisions, coder, batch and unchanged status. Original response text, all nonbehavior coding, notes, evidence, response type, coder/batch ownership, and completion/discussion statuses are preserved. Before/after hashes in the migration manifest verify preservation of responses, stable annotation content, nonbehavior code records, and preexisting history.
+
+Context-sensitive and unknown/edited labels are **not guessed from keywords**. For instance, Sharing opinions may contain a public performance inherited from an earlier merge; Asking for contact information need not be romantic. Those assignments retain the retired code and get a separate `behavior_reviews` record carrying original response, previous annotation and relevant earlier history. Other to discuss becomes a migration review flag, never an automatic Other behavior assignment. Retained legacy selections cannot be newly added to another reading.
+
+Administrators open **Team → Vocabulary migration report and review assignments** (`/migration-review`). The report includes backup path, preservation hashes, complete old-to-new mapping, exact canonical definitions, and every unresolved assignment. An administrator can resolve a review using the original response and history, choose zero or more canonical replacements, and record the evidence. Resolution is version-checked and transactional, preserves notes/status, and writes `annotation_migration_review` history. It may reconcile a past batch without opening that batch for ordinary edits. Unresolved flags remain visible in the reading room and annotation CSV export, independently of completion status. A normal coding edit does not silently clear migration flags.
+
+`GET /api/codebook-version` requires sign-in and returns the version plus exact selectable names/definitions. `GET /api/behavior-migration` and its resolution endpoint require an administrator. `/health` returns application vocabulary version and Render commit metadata without research data. Verify actual live labels and the migration report, not `/health` alone.
+
+## Reading and team workflow
+
+The imported dataset has 658 survey records / 5,264 response slots, including 5,075 nonblank responses. Responses are immutable. Filters separate domain, perspective, prompt and reading status. Coders have independent annotations within each batch; shared codebook access does not permit retrieving another coder's readings. Notes autosave; Complete & next advances the queue. Network/conflict failures retain unsaved text in the page: do not close it before recovering your work. This is not an offline app.
+
+Only administrators create coding batches. Every coder may select batches. Starting a batch preserves previous work and makes previous batches read-only; a selected starting participant rotates the queue. Exports include all saved batches and coder/batch identifiers. The codebook is shared across batches.
+
+Compare coders is administrator-only, supports coder selection, completed or provisional readings, and highlights unequal code sets or response types. Missing readings are not disagreements; observations are reviewed separately. Administrative corrections in the current batch use optimistic versions and revision history. No separate consensus/adjudication flag is stored. Assignment-based restrictions are not implemented.
+
+## Local preview
+
+Requires Node.js 24.4+ in the 24.x series; no third-party JavaScript dependencies or frontend build.
 
 ```sh
-cd "/path/to/Qualitative coding app"
-node manage.mjs import "../Combined data/social_risk_combined_analysis.csv"
+node manage.mjs import '../Combined data/social_risk_combined_analysis.csv'
 node server.mjs --preview
 ```
 
-The app has no third-party JavaScript dependencies and no separate frontend build. It uses Node's built-in HTTP server, crypto, and SQLite APIs. Its Node 24 requirement is deliberate; do not use an older Node version. [Node SQLite documentation](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html).
+Open http://127.0.0.1:4317 and choose Open local workspace, or use `start-preview.command` on the configured Mac. Preview creates a local administrator and is restricted to loopback; production rejects it. Startup backs up and migrates an existing vocabulary. Do not expose preview publicly.
 
-Local preview is restricted to loopback and is for the computer's owner. It creates a local researcher identity; it is not the authentication mode to expose to RAs. Production rejects the preview flag.
+The Drive development database is an independent local workspace, not the Render database. Preserve and migrate its own annotations; never replace it with Render data. Do not run concurrent SQLite writers through Drive/Dropbox synchronization. Server storage must be server-local.
 
-## Reading workflow
+## Deployment and backups
 
-1. Filter by general/social, self/others, approach/avoid, or your own review status. Search response text or participant labels. Blank answers are hidden initially but can be included.
-2. Read the original, unmodified response. Expand the question/source or the other seven responses in the same survey record when helpful. Displayed question wording is explicitly labeled as a summary.
-3. Choose concrete **Behavior** codes, including actions considered or avoided. Multiple codes may fit. The 44 provisional behavior codes are organized into 12 broad categories. Choose a broad category first, then an individual behavior. You can add behaviors from multiple categories. The guide expands one category at a time. New code is available before choosing a category. In its dialog, choose an existing broad category or add a new category, then enter the behavior name. The current category is preselected when available. Saving adds the behavior and any new category to the shared pool.
-4. Code any **Anticipated interpersonal consequence** supported by the response: Rejection, Judgment, Conflict, Burdening someone, Relationship loss, or Other. Coders can use **+ New code** to add another consequence to the shared pool.
-5. Optionally code **Who is involved?** and **Setting**, using only stated context. There are nine starting relationship codes and eight setting codes. Who is involved defaults to Unspecified for an unread response; replace it when the response identifies someone. Leave an unsupported setting empty or select Unspecified.
-6. Use **Observations** for context-dependent meanings, contradictions, alternative actions, or explicitly stated stakes worth retaining. There are no evidence dropdowns or separate loss, benefit, reason, decision, or outcome fields.
-7. Notes autosave after a short pause. **Needs discussion** flags the response in your queue. **Complete & next** marks your reading complete, not the team's consensus. Alt+Left/Right navigates the current queue.
+`render.yaml` defines Node 24, runs the test suite as its build, starts `node server.mjs`, and uses `/var/data/coding.sqlite` on a persistent disk. No database, responses, account details, or migration review evidence belong in the repository. Render uses `RENDER_EXTERNAL_URL` as its HTTPS origin; set `APP_ORIGIN` only for a custom origin. The migration runs against that persistent database before the service accepts traffic.
 
-The starting vocabulary was informed by an exploratory reading of 400 responses, 50 from each prompt. It is provisional, not a frequency analysis, and no behaviors are automatically coded. “Expressing yourself or your views in front of others” includes asking or answering a question, sharing an opinion, presenting, performing, and discussing political or religious beliefs, whether the respondent acted or chose not to act.
+Docker is also supported: set `APP_ORIGIN` in `.env`, place the input CSV under `input/`, then run `docker compose up -d --build` and `docker compose exec coding node manage.mjs import /input/social_risk_combined_analysis.csv`. Publish through an HTTPS reverse proxy to the loopback application port. `Caddyfile.example` is a starting point.
 
-Existing coding is preserved: former dimensions, evidence selections, descriptions, excerpts, and memo fields remain in the database and exports. The old Situation dimension mixed people and settings, so it is not automatically mapped to the new fields. Untouched broad starter behaviors are retired from new selections; their IDs and prior assignments remain intact. User-created and revised behavior codes are retained.
-
-An answer under “approach” may describe avoidance. General risk may include social risk. “Others” answers describe perceived peer behavior. The app preserves the prompt separately from your interpretation. It does not infer motives, generate annotations, or perform AI coding.
-
-## Load the starter categories on a new server
-
-After creating the administrator, run:
+Management commands use `DB_PATH` (default `data/coding.sqlite`):
 
 ```sh
-docker compose exec coding node manage.mjs seed-codebook lab-admin
-# Without Docker: node manage.mjs seed-codebook lab-admin
+node manage.mjs backup /private/new-backup.sqlite
+node manage.mjs seed-codebook ADMIN_USERNAME
+node manage.mjs add-user USERNAME admin 'Display name' # password from stdin
+node manage.mjs reset-password USERNAME               # password from stdin
+node manage.mjs disable-user USERNAME
 ```
 
-This inserts the 67 starting labels as drafts and records their provenance in the revision history. It is safe to repeat: existing definitions and edits are preserved, including renamed starter codes. When upgrading untouched earlier starters, it renames and consolidates the revised labels, retires superseded labels, and migrates their saved assignments without changing response text. It does not assign behavior or consequence codes to responses. The local workspace already has these labels loaded.
+Keep passwords out of command arguments and shell history. Production passwords are hashed, sessions expire in 12 hours, cookies are HttpOnly/SameSite, and writes require origin and CSRF checks. There is no public registration or password recovery.
 
-## Shared codebook and team behavior
+To restore a backup: stop the server, preserve current database/WAL files as a separate rollback copy, restore the snapshot in a clean data directory without stale WAL/SHM files, set service-account ownership, then restart. To roll back a vocabulary deployment, restore the matching prior application code as well, or startup will migrate again.
 
-- Each account has independent annotations and progress within each coding batch. An RA cannot retrieve or overwrite another RA's annotations through the API. All researchers see the same responses and shared codebook; assignment-based restrictions are not implemented.
-- The reading dimension is supplied automatically. For a new behavior, choose or create a broad category and enter the behavior name. Other dimensions ask only for a code name. Saving adds the code to that dimension’s shared category pool immediately, without assigning it to the current response. In the Codebook view, select a dimension before adding a code. Researchers may rename their own new codes, and administrators may rename any code. Older codebook entries are retained in exports. Code lifecycle metadata remains internal and in exports; there is no status field in the entry form.
-- A code's dimension cannot change after creation. Create a new code for a different dimension. There is no destructive code deletion or automatic code merging.
-- Concurrent edits are version-checked. A conflicting save is rejected rather than silently overwriting the other edit. The page retains unsaved text and asks you to copy it before reloading. Failed network saves also retain text in the open page, but this is not an offline app; do not close an unsaved page.
-- Administrators can add accounts in **Team**, start named coding batches, inspect completion counts, export all annotations, and export the revision history. Administrators can use Compare coders for a side-by-side review. Adjudication is not implemented; independent readings remain separate.
+## Exports and verification
 
-## Coding batches and repeated passes
-
-The **Coding batch** selector in the reading queue keeps repeated coding passes separate. An administrator can choose **New batch**, give the pass a name, and optionally select a participant such as `P041` as the starting point. The new batch begins with no saved annotations. Its queue starts at the chosen participant, continues to the end of the response set, and then wraps around to the beginning, so repeated pilots do not always begin with `P001`.
-
-Starting a new batch makes the previous batch read-only; it does not delete or copy its annotations. Researchers can select an earlier batch to review its saved coding, progress, and comparisons. Only the current batch accepts saves. Exports include every saved batch and identify each row with `batch_id`, `coding_batch`, `batch_active`, and `start_participant`.
-- All annotation saves and code edits create history entries. CSV exports use current code labels; the JSON history retains earlier definitions and annotation versions.
-- Progress includes all imported response slots, including blanks, so the denominator is 5,264 for this dataset. The initial reading queue contains 5,075 nonblank responses. “NA” and similar participant-entered strings are retained as text for a researcher to classify.
-
-## Hosting on your server
-
-Yes: a single Linux server capable of running Docker or Node.js 24 can run this app. RAs only need a browser. It uses one application process and a persistent SQLite database, suitable as a starting architecture for a small lab team. No cloud database, external authentication service, or paid hosting platform is required. Large-team load testing has not been performed.
-
-Use a dedicated hostname such as `https://coding.your-lab.edu`. This version expects deployment at the hostname root, not at a URL subpath. Configure `APP_ORIGIN` to that exact origin, without a trailing slash. It is used to check write requests, and HTTPS enables secure cookies.
-
-### Docker deployment
-
-1. Copy this application's source directory to your server. Do not publish the source dataset or database in a public web directory. The Docker image intentionally excludes data, input files, and secrets.
-2. Put the harmonized CSV in `input/social_risk_combined_analysis.csv` beside `compose.yaml`.
-3. Copy `.env.example` to `.env` and set the actual HTTPS origin.
-4. Run:
+Annotation CSVs contain only saved readings and retain legacy dimensions plus migration flags. Codebook CSVs retain retired codes for audit. Spreadsheet formula-like strings are escaped only in exports; originals remain unchanged in SQLite. History JSON is an audit trail, not a database backup.
 
 ```sh
-docker compose up -d --build
-docker compose exec coding node manage.mjs import /input/social_risk_combined_analysis.csv
+node --test tests/*.test.mjs
 ```
 
-5. Create your first administrator. In a Bash shell, these commands read the password without displaying it or placing it in shell history:
-
-```bash
-read -r -s -p "Administrator password (12+ characters): " coding_password
-printf '\n'
-printf '%s' "$coding_password" | docker compose exec -T coding node manage.mjs add-user lab-admin admin "Lab administrator"
-unset coding_password
-```
-
-6. Configure your existing HTTPS reverse proxy to forward the hostname to `127.0.0.1:4317` on the server. `Caddyfile.example` supplies a minimal example for a Caddy instance running on the host. Caddy can provision certificates when DNS and network access are configured correctly. [Caddy HTTPS guide](https://caddyserver.com/docs/quick-starts/https) and [reverse proxy documentation](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy).
-7. Sign in as the administrator and add RA accounts from **Team**. Give each RA their own username and password privately.
-
-The Compose file publishes the app port only to the server's loopback address; the HTTPS proxy is the public entry point. Do not expose `--preview` or forward the local-preview server to the internet. There are no public registration or password-recovery endpoints. Passwords are salted and hashed, session cookies are HttpOnly and SameSite=Strict, sessions expire after 12 hours, and write requests require an origin and session CSRF token. Login failures are rate-limited. Researcher access should still follow your lab's data-access procedures.
-
-### Run without Docker
-
-Keep data on server-local storage and run the process as a dedicated, unprivileged service account. Use a process manager such as systemd. Set:
-
-```sh
-export NODE_ENV=production
-export APP_ORIGIN=https://coding.your-lab.edu
-export DB_PATH=/var/lib/social-risk-coding/coding.sqlite
-export HOST=127.0.0.1
-export PORT=4317
-node manage.mjs import /private/path/social_risk_combined_analysis.csv
-# Create the initial administrator using the same stdin pattern as above,
-# replacing the Docker command with: node manage.mjs add-user lab-admin admin
-node server.mjs
-```
-
-Create the database directory with ownership restricted to the service account before running. Use the same `DB_PATH` for management and server commands. Keep the SQLite database on one machine's local disk, not an NFS share or a live Google Drive/Dropbox synchronization folder. The app directory in this workspace is for development; the Docker volume is the recommended server data location. Never run several deployed copies against separately synchronized database files.
-
-### Backups and account management
-
-Use the backup command to make a consistent snapshot, including committed data in SQLite's write-ahead log. Do not copy only the live `.sqlite` file while it is running.
-
-```sh
-docker compose exec coding node manage.mjs backup /app/data/backup-2026-10-01.sqlite
-docker compose cp coding:/app/data/backup-2026-10-01.sqlite ./backup-2026-10-01.sqlite
-```
-
-Use a new filename for each backup. Store copies securely off-server and test restoring them. To restore, stop the application, preserve the current database files as a rollback copy, replace the database with a snapshot in an otherwise clean data directory, set its service-account ownership, and restart. Do not leave old `-wal` or `-shm` files beside a restored database. Backups include response text, annotations, account hashes, and session data.
-
-```sh
-# Disable an account and revoke sessions:
-docker compose exec coding node manage.mjs disable-user ra-name
-# Reset a password using the stdin pattern above:
-# ... | docker compose exec -T coding node manage.mjs reset-password ra-name
-```
-
-Import is idempotent: repeating an unchanged import does not duplicate responses or discard annotations. Changed existing responses abort the whole import. New records append, keeping stable response IDs. Removed rows in an incoming file are not deleted from the database. The source CSV and preprocessing RMD are never modified by this app.
-
-## Export and data model
-
-- `responses`: immutable imported text and selected source metadata, keyed by analysis response key plus prompt.
-- `coding_batches`: named coding passes with one current batch and an optional starting participant.
-- `annotations`: one current annotation per response/account/batch, with status and version.
-- `codes`: shared draft/active/retired definitions with stable IDs and versions.
-- `history`: previous saved annotations and code edits.
-- `users` / `sessions`: account and session records.
-
-**Export my annotations** and **Export team annotations** include only saved annotations, not every unread response. They include the coding batch and source keys so rows can be separated by coding pass and joined back to the harmonized CSV. Code IDs and names are JSON arrays in CSV cells to avoid delimiter ambiguity. Exports neutralize formula-like strings by prefixing an apostrophe for spreadsheet safety; the database retains the original text exactly. The revision-history JSON is an audit export, not a database backup.
-
-## Verification
-
-```sh
-npm test
-```
-
-Tests use temporary synthetic data and exercise imports, exact text preservation, source-change rollback, authentication, CSRF/origin checks, separate coder and batch annotations, batch rotation and preservation, conflicting saves, excerpt validation, code permissions, filters, account creation, logout, and exports. Browser checks cover the reading and codebook flows and responsive layouts. Docker deployment and your server's proxy configuration must still be verified on the actual server.
-
-## Render deployment
-
-`render.yaml` provisions one 512 MB web service and a 1 GB persistent disk. Keep the workspace on Hobby. The app uses Render's HTTPS `RENDER_EXTERNAL_URL` automatically; set `APP_ORIGIN` only if switching to a custom domain. The disk is mounted at `/var/data`, and `DB_PATH` points there. No data or accounts are embedded in the repository. Transfer a consistent database backup separately before inviting researchers, and set a usable administrator password via the management CLI. Revoke migrated sessions. Do not use preview mode on Render.
-
-## Compare coders
-
-Administrators have a **Compare coders** navigation section backed by `GET /api/comparison`. It compares the batch currently selected in the reading queue, parses each saved annotation payload, resolves code IDs against the shared codebook, and displays the response beside each researcher’s username, labels, response type, and observations. An administrator can edit an existing saved reading in the current batch; earlier batches are read-only. The participant's original response text remains immutable. Corrections use optimistic version checks and create `annotation_admin_edit` revision-history entries naming the batch, affected coder, and administrator. On Render this uses the live persistent database; local preview uses its configured database.
-
-Completed readings are compared by default; the provisional option includes draft and flagged readings. Administrators can include or exclude individual coders from the comparison, and the response list, summary counts, field highlighting, and disagreement labels are recalculated from only the selected coders. At least two eligible readings are required. Disagreement means unequal code-ID sets in Behavior, Anticipated interpersonal consequence, Who, or Setting, or different response types. Code selection order does not matter. Differing fields and labels receive amber highlighting and explicit text. Free-text Observations differences are called out for review, not scored as label disagreements.
-
-Active accounts and inactive accounts with saved work appear as separate columns. Missing readings are shown explicitly and excluded from agreement calculations. Matching empty code sets carry a warning. “Consistent” refers only to the compared readings; it does not establish coding validity or team consensus. The page includes saved responses only, search, agreement filters, and pagination. Access is administrator-only so independent coders cannot see one another’s readings through the UI or API. Disagreement is derived from the current saved readings rather than stored as a separate flag, so it is recalculated immediately after an administrative correction. No separate adjudication or resolution flag is written.
-
-The parser can also produce a standalone comparison report from a database file without modifying it:
-
-```sh
-node comparison.mjs /path/to/coding.sqlite > comparison-report.json
-# Include unfinished readings provisionally:
-node comparison.mjs /path/to/coding.sqlite --include-drafts > provisional-report.json
-```
-
-These reports contain research data; keep them with research outputs, not in the source repository.
-
-On startup, an existing database is migrated automatically: all current annotations are assigned to the preserved **Initial coding** batch, and subsequent batches use a three-part response/coder/batch key. Back up the database before deploying a schema change. Render runs the same migration against its persistent database during deployment.
-
-## October 12 coding review update
-
-Framework v5 applies the agreed consolidations on startup, including edited and coder-created labels with the exact superseded names. Sharing opinions replaces public expression labels; Participating publicly is removed from the starter categories. Leadership and challenging course/class items become Taking up a challenge. Personal feelings and struggles become Sharing something personal. Declining an invitation becomes Not going to social events. Trying an unfamiliar activity becomes Trying something new. Using AI covers use and avoidance in academic and everyday contexts. Asking someone on a date becomes Other to discuss for review, rather than an inferred romantic-feelings label. Original response text, annotation status, notes, and prior code definitions remain preserved; merged selections are remapped and deduplicated across all batches, with revision history. Other coding dimensions are unchanged.
+Tests cover both Drive v4 and expanded Render v5 vocabulary fixtures, canonical definitions, multiple coders and batches, deduplication, ambiguous/unknown labels, independent review flags, preservation, rollback, backup, idempotence, authentication and code API restrictions, original source import, concurrency, comparisons, and exports. Browser verification should cover the flat selector, guide, codebook, current/past batches and administrator migration report. Inspect the live database report after deployment.
