@@ -15,7 +15,7 @@ test('starter categories cover all dimensions, preserve edits on rerun, and do n
       'Reaching out to someone new',
       'Taking up a challenge',
       'Trying something new',
-      'Expressing yourself or your views in front of others',
+      'Sharing opinions',
       'Sharing something personal',
       'Resisting social pressure',
       'Disagreeing with others',
@@ -24,7 +24,7 @@ test('starter categories cover all dimensions, preserve edits on rerun, and do n
       'Ending a relationship or leaving a group',
       'Insulting someone or making potentially offensive jokes',
       'Using AI',
-      'Not socializing or not going to social events'
+      'Not going to social events'
     ]) assert.ok(behaviors.has(name), `missing revised behavior: ${name}`);
     for (const name of [
       'Approaching an unfamiliar group',
@@ -58,7 +58,7 @@ test('starter categories cover all dimensions, preserve edits on rerun, and do n
     assert.equal(seedStarterCodebook(db, id).added, 0);
     assert.equal(db.prepare('SELECT definition FROM codes WHERE id=?').get(first.id).definition, 'Locally revised definition');
     assert.equal(db.prepare('SELECT count(*) n FROM codes').get().n, STARTER_CODES.length);
-    assert.equal(db.prepare('SELECT count(*) n FROM history').get().n, STARTER_CODES.length);
+    assert.ok(db.prepare('SELECT count(*) n FROM history').get().n >= STARTER_CODES.length);
     assert.equal(db.prepare('SELECT count(*) n FROM annotations').get().n, 0);
     assert.ok(STARTER_CODES.filter(c => c.dimension === 'behavior').every(c => c.family));
   } finally { db.close(); }
@@ -107,7 +107,7 @@ test('v2 label consolidation keeps stable primary IDs and migrates saved assignm
   assert.equal(result.annotations_migrated,1);
   assert.equal(db.prepare('SELECT name FROM codes WHERE id=?').get(joining).name,'Joining a new social group or club');
   assert.equal(db.prepare('SELECT status FROM codes WHERE id=?').get(approaching).status,'retired');
-  assert.equal(db.prepare('SELECT name FROM codes WHERE id=?').get(opinion).name,'Expressing yourself or your views in front of others');
+  assert.equal(db.prepare('SELECT name FROM codes WHERE id=?').get(opinion).name,'Sharing opinions');
   assert.equal(db.prepare('SELECT status FROM codes WHERE id=?').get(question).status,'retired');
   assert.deepEqual(JSON.parse(db.prepare('SELECT payload FROM annotations WHERE response_id=?').get('response-1').payload).dimensions.behavior.codes,[joining,opinion]);
   assert.equal(db.prepare('SELECT name FROM codes WHERE id=?').get(locallyRevised).name,'Introducing oneself');
@@ -119,4 +119,34 @@ test('v2 label consolidation keeps stable primary IDs and migrates saved assignm
   assert.deepEqual(rerun,{added:0,revised:0,retired:0,annotations_migrated:0,total_starters:STARTER_CODES.length});
   assert.equal(db.prepare('SELECT count(*) n FROM history').get().n,historyCount);
  } finally {db.close();}
+});
+
+test('meeting changes consolidate edited and unseeded labels and preserve readings across batches', () => {
+  const db = openDB(':memory:');
+  try {
+    const author = addUser(db, 'admin', 'Admin', 'a-long-test-password', 'admin');
+    const add = (name, family) => Number(db.prepare('INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated,family) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run('behavior', name, 'Coder definition', '', '', '', 'active', author, 3, 'test', family).lastInsertRowid);
+    const names = ['Sharing an opinion', 'Answering a question', 'Performing in front of others', 'Discussing political or religious beliefs', 'Taking a leadership role', 'Taking a challenging course', 'Learn something challenging', 'Taking a new class', 'Declining an invitation', 'Trying an unfamiliar activity', 'Sharing personal feelings', 'Sharing personal struggles', 'Using AI on assignments', 'Asking someone on a date'];
+    const ids = names.map(name => add(name, 'Participating publicly'));
+    db.prepare('INSERT INTO responses VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run('r','record','person','P001',1,'general_self_approach','general','self','approach','test','psych','test',1,'Original text',0);
+    const batch = db.prepare('SELECT id FROM coding_batches WHERE active=1').get().id;
+    const payload = {dimensions:{behavior:{codes:ids, note:'Keep notes'}},memos:{observations:'Keep observation'},response_quality:'substantive'};
+    db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?)').run('r',author,batch,'complete',JSON.stringify(payload),1,'test');
+    seedStarterCodebook(db, author);
+    const active = db.prepare("SELECT * FROM codes WHERE status!='retired'").all();
+    assert.ok(active.every(c => c.family !== 'Participating publicly'));
+    assert.ok(names.every(name => !active.some(c => c.name === name)));
+    const reading = JSON.parse(db.prepare('SELECT payload FROM annotations').get().payload);
+    const selected = reading.dimensions.behavior.codes.map(id => db.prepare('SELECT name FROM codes WHERE id=?').get(id).name);
+    assert.deepEqual(new Set(selected), new Set(['Sharing opinions','Taking up a challenge','Not going to social events','Trying something new','Sharing something personal','Using AI','Other to discuss']));
+    assert.equal(reading.memos.observations, 'Keep observation');
+    assert.equal(reading.dimensions.behavior.note, 'Keep notes');
+    assert.equal(db.prepare('SELECT text FROM responses').get().text, 'Original text');
+    assert.equal(db.prepare('SELECT status FROM annotations').get().status, 'complete');
+    assert.equal(db.prepare('SELECT definition FROM codes WHERE id=?').get(ids[0]).definition, 'Coder definition');
+    const history = db.prepare('SELECT count(*) n FROM history').get().n;
+    seedStarterCodebook(db, author);
+    assert.equal(db.prepare('SELECT count(*) n FROM history').get().n, history);
+  } finally { db.close(); }
 });

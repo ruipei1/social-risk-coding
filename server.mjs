@@ -337,7 +337,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const seedAuthor = db.prepare("SELECT id FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1").get();
   if (seedAuthor) {
     const seeded = seedStarterCodebook(db, seedAuthor.id);
-    if (seeded.added || seeded.updated) console.log('Starter codebook synchronized:', seeded);
+    if (seeded.added || seeded.revised || seeded.retired || seeded.annotations_migrated) console.log('Starter codebook synchronized:', seeded);
   }
   const server = http.createServer({ requestTimeout: 30000, headersTimeout: 15000 }, handler);
   server.listen(port, host, () => console.log(`Social Risk Coding: ${origin}${preview ? ' (local preview)' : ''}`));

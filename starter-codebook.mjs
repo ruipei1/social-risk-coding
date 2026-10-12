@@ -1,7 +1,7 @@
 import { transaction, timestamp } from './model.mjs';
 
-const FRAMEWORK_VERSION = 'behavior-framework-v4';
-const PREVIOUS_FRAMEWORK_VERSIONS = ['behavior-framework-v3', 'behavior-framework-v2'];
+const FRAMEWORK_VERSION = 'behavior-framework-v5';
+const PREVIOUS_FRAMEWORK_VERSIONS = ['behavior-framework-v4', 'behavior-framework-v3', 'behavior-framework-v2'];
 
 const families = {
   "Making social connections": [
@@ -10,17 +10,14 @@ const families = {
     "Inviting someone to an activity",
     "Reconnecting with someone",
     "Attending a social event",
-    "Not socializing or not going to social events"
+    "Not going to social events"
   ],
   "Romantic initiation": [
     "Expressing romantic feelings"
   ],
   "Expressing views": [
-    "Expressing yourself or your views in front of others",
+    "Sharing opinions",
     "Disagreeing with others"
-  ],
-  "Participating publicly": [
-    "Taking a leadership role"
   ],
   "Seeking help or opportunities": [
     "Asking for help or a favor",
@@ -70,20 +67,22 @@ const families = {
     "Investing money",
     "Taking part in sports or exercise",
     "Changing travel plans",
-    "Trying something new"
+    "Trying something new",
+    "Other to discuss"
   ]
 };
 const who = ["Friend", "Unfamiliar person", "Romantic interest or partner", "Family member", "Classmate", "Coworker", "Authority figure", "Group", "Unspecified"];
 const settings = ["Class or school", "Work", "Social gathering", "Online interaction", "Home", "Travel or road", "Sport or recreation", "Unspecified"];
 const consequences = ["Rejection", "Judgment", "Conflict", "Burdening someone", "Relationship loss", "Other"];
 
-// Each entry lists the untouched v2 starter labels that roll into the v3 label.
-// User-revised entries are deliberately left alone rather than overwritten.
+// Named meeting consolidations also include edited and coder-created labels.
+// Other earlier starter migrations continue to preserve user revisions.
 const migrationSources = new Map(Object.entries({
   'behavior:Reaching out to someone new': ['Reaching out to someone new', 'Introducing oneself'],
   'behavior:Joining a new social group or club': ['Joining a new social group or club', 'Joining a group or club', 'Approaching an unfamiliar group'],
-  'behavior:Expressing romantic feelings': ['Expressing romantic feelings', 'Asking for contact information', 'Asking someone on a date'],
-  'behavior:Expressing yourself or your views in front of others': [
+  'behavior:Expressing romantic feelings': ['Expressing romantic feelings', 'Asking for contact information'],
+  'behavior:Sharing opinions': [
+    'Sharing opinions',
     'Expressing yourself or your views in front of others',
     'Sharing an opinion',
     'Discussing political or religious beliefs',
@@ -101,7 +100,7 @@ const migrationSources = new Map(Object.entries({
     'Expressing dissatisfaction'
   ],
   'behavior:Sharing something personal': ['Sharing something personal', 'Sharing personal struggles', 'Sharing personal feelings'],
-  'behavior:Not socializing or not going to social events': ['Not socializing or not going to social events', 'Declining an invitation'],
+  'behavior:Not going to social events': ['Not going to social events', 'Not socializing or not going to social events', 'Declining an invitation'],
   'behavior:Resisting social pressure': ['Resisting social pressure', 'Declining alcohol or drugs'],
   'behavior:Ending a relationship or leaving a group': ['Ending a relationship or leaving a group', 'Ending a relationship', 'Leaving a group'],
   'behavior:Insulting someone or making potentially offensive jokes': [
@@ -110,7 +109,8 @@ const migrationSources = new Map(Object.entries({
     'Making potentially offensive jokes'
   ],
   'behavior:Using AI': ['Using AI', 'Using AI on assignments'],
-  'behavior:Taking up a challenge': ['Taking up a challenge', 'Taking a challenging course'],
+  'behavior:Taking up a challenge': ['Taking up a challenge', 'Taking a challenging course', 'Taking a leadership role', 'Learn something challenging', 'Taking a new class'],
+  'behavior:Other to discuss': ['Other to discuss', 'Asking someone on a date'],
   'behavior:Trying something new': ['Trying something new', 'Trying an unfamiliar activity']
 }));
 
@@ -121,6 +121,12 @@ export const STARTER_CODES = [
   ...consequences.map(name => ({dimension:'anticipated_interpersonal_consequence', family:'', name}))
 ].map(c => ({ ...c, seed_key:`${FRAMEWORK_VERSION}:${c.dimension}:${c.name}`, definition:'', include_rule:'', exclude_rule:'', example:'', status:'draft' }));
 
+const agreedMerges = new Set(['Sharing opinions', 'Sharing something personal', 'Not going to social events', 'Taking up a challenge', 'Using AI', 'Trying something new', 'Other to discuss']);
+const guidance = {
+  'Using AI': { definition: 'Using, considering, or choosing not to use AI in academic work or everyday life.', include_rule: 'Include AI use and avoidance across daily life; academic assignments are one context, not a separate behavior.' },
+  'Other to discuss': { definition: 'A behavior requiring discussion before assigning a more specific label.', include_rule: 'Include dating and relationship edge cases when their meaning is genuinely ambiguous.', exclude_rule: 'Do not infer a specific behavior from an ambiguous response.' },
+  'Sharing opinions': { include_rule: 'Includes sharing opinions or political/religious beliefs, answering questions, performing, and presenting in front of others.' }
+};
 const sourceNames = code => migrationSources.get(`${code.dimension}:${code.name}`) || [code.name];
 const previousSeedKeys = (dimension, name) => PREVIOUS_FRAMEWORK_VERSIONS.map(version => `${version}:${dimension}:${name}`);
 
@@ -180,7 +186,8 @@ export function seedStarterCodebook(db, authorId) {
     for (const code of STARTER_CODES) {
       if (db.prepare('SELECT code_id FROM codebook_seeds WHERE seed_key=?').get(code.seed_key)) continue;
 
-      const sources = [...new Map(sourceNames(code).flatMap(name => previousSeedKeys(code.dimension, name).map(seedKey => db.prepare(`
+      const agreed = code.dimension === 'behavior' && agreedMerges.has(code.name);
+      const sources = agreed ? sourceNames(code).map(name => db.prepare("SELECT * FROM codes WHERE dimension=? AND name=? AND status!='retired'").get(code.dimension, name)).filter(Boolean) : [...new Map(sourceNames(code).flatMap(name => previousSeedKeys(code.dimension, name).map(seedKey => db.prepare(`
         SELECT c.* FROM codes c
         JOIN codebook_seeds s ON s.code_id=c.id
         WHERE s.seed_key=? AND c.dimension=? AND c.name=? AND c.status='draft'
@@ -203,6 +210,22 @@ export function seedStarterCodebook(db, authorId) {
         revised++;
       }
 
+      if (guidance[code.name]) {
+        const fields = guidance[code.name];
+        const next = {...primary};
+        // Preserve definitions and append the agreed inclusion guidance.
+        for (const [key, value] of Object.entries(fields)) {
+          if (!next[key]) next[key] = value;
+          else if (key === 'include_rule' && !next[key].includes(value)) next[key] += '\n' + value;
+        }
+        if (Object.keys(fields).some(key => next[key] !== primary[key])) {
+          next.version = primary.version + 1; next.updated = timestamp();
+          db.prepare('UPDATE codes SET definition=?,include_rule=?,exclude_rule=?,version=?,updated=? WHERE id=?')
+            .run(next.definition, next.include_rule, next.exclude_rule, next.version, next.updated, primary.id);
+          recordCodeHistory(db, next, authorId, 'Added guidance agreed at coding label review.');
+          primary = next; revised++;
+        }
+      }
       db.prepare('INSERT INTO codebook_seeds VALUES (?,?)').run(code.seed_key, primary.id);
       for (const source of sources) {
         if (source.id === primary.id) continue;

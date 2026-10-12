@@ -173,3 +173,7 @@ node comparison.mjs /path/to/coding.sqlite --include-drafts > provisional-report
 These reports contain research data; keep them with research outputs, not in the source repository.
 
 On startup, an existing database is migrated automatically: all current annotations are assigned to the preserved **Initial coding** batch, and subsequent batches use a three-part response/coder/batch key. Back up the database before deploying a schema change. Render runs the same migration against its persistent database during deployment.
+
+## October 12 coding review update
+
+Framework v5 applies the agreed consolidations on startup, including edited and coder-created labels with the exact superseded names. Sharing opinions replaces public expression labels; Participating publicly is removed from the starter categories. Leadership and challenging course/class items become Taking up a challenge. Personal feelings and struggles become Sharing something personal. Declining an invitation becomes Not going to social events. Trying an unfamiliar activity becomes Trying something new. Using AI covers use and avoidance in academic and everyday contexts. Asking someone on a date becomes Other to discuss for review, rather than an inferred romantic-feelings label. Original response text, annotation status, notes, and prior code definitions remain preserved; merged selections are remapped and deduplicated across all batches, with revision history. Other coding dimensions are unchanged.
