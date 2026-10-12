@@ -37,12 +37,15 @@ test('a name-only code enters the shared dimension pool without annotating a res
  const s=setup();try {
    const a=await s.login('coder-a','coder-a-test-password'), b=await s.login('coder-b','coder-b-test-password');
    const created=await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'Setting a limit'}});
-   assert.equal(created.status,403);
+   assert.equal(created.status,200);
+   const shared=(await s.request('/api/codes',b)).data.find(c=>c.id===created.data.id);
+   assert.equal(shared.name,'Setting a limit'); assert.equal(shared.family,''); assert.equal(shared.status,'draft');
+   assert.equal((await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'setting a limit'}})).status,409);
    const consequence=await s.request('/api/codes',{...a,method:'POST',body:{dimension:'anticipated_interpersonal_consequence',name:'Embarrassment'}});
    assert.equal(consequence.status,200);
    assert.equal((await s.request('/api/codes',b)).data.find(c=>c.id===consequence.data.id).name,'Embarrassment');
    assert.equal(s.db.prepare('SELECT count(*) n FROM annotations').get().n,0);
-   assert.equal((await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'  '}})).status,403);
+   assert.equal((await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name:'  '}})).status,400);
  } finally {s.close();}
 });
 
@@ -203,5 +206,16 @@ test('behavior edit and retired reintroduction are blocked; current legacy assig
  s.db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?)').run('test-record:general_self_approach',2,1,'complete',JSON.stringify(a.payload),1,'test');
  a.version=1;a.status='complete';assert.equal((await s.request('/api/annotation/test-record:general_self_approach',{...coder,method:'PUT',body:a})).status,200);
  assert.equal((await s.request('/api/behavior-migration',coder)).status,403);
+ }finally{s.close();}
+});
+
+test('Other behavior is last even when coders add alphabetically later labels', async()=>{
+ const s=setup();try{
+  const a=await s.login('coder-a','coder-a-test-password');
+  for(const name of ['Other behavior','Zebra behavior','Approaching others'])
+   assert.equal((await s.request('/api/codes',{...a,method:'POST',body:{dimension:'behavior',name,family:'Ignored category'}})).status,200);
+  const codes=(await s.request('/api/codes',a)).data.filter(c=>c.dimension==='behavior');
+  assert.deepEqual(codes.map(c=>c.name),['Approaching others','Zebra behavior','Other behavior']);
+  assert.ok(codes.every(c=>c.family===''));
  }finally{s.close();}
 });

@@ -21,7 +21,7 @@ const rows = [
  ['Other behavior','A clearly described action outside the vocabulary; retain a short description in observations','Use for an established action not covered above. Online communication or AI use without an established function can go here.','Unclear legacy assignments require review, not automatic Other behavior. Other to discuss is a review flag, not this label.']
 ];
 export const BEHAVIOR_CODES = rows.map(([name,definition,include_rule,exclude_rule])=>({dimension:'behavior',name,definition,include_rule,exclude_rule,example:'',family:'',status:'active'}));
-export const VOCABULARY_NOTE = 'Code actions done, considered, or avoided independently of Approach/Avoid. Multiple labels require distinct actions stated in the response. Behavior choices are fixed; use Other behavior with a short observation for an action outside the vocabulary.';
+export const VOCABULARY_NOTE = 'Code actions done, considered, or avoided independently of Approach/Avoid. Multiple labels require distinct actions stated in the response. Add a new behavior code for a useful distinction, or use Other behavior with a short observation.';
 const groups = [
  ['Initiating social contact',['Approaching an unfamiliar group','Introducing oneself','Reaching out to someone new','Initiating contact']],
  ['Reconnecting',['Reconnecting with someone']],

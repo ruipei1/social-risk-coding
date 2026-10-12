@@ -107,7 +107,7 @@ function renderResponse() {
   const quality = a.version === 0 && r.blank ? 'blank' : (a.payload.response_quality || 'substantive');
   $('#coding-fields').innerHTML = `<label class="quality">Response type<select id="response-quality">${[['substantive','Substantive response'],['no_example','No example recalled / not applicable'],['ambiguous','Too ambiguous to interpret'],['off_topic','Off topic'],['blank','Blank response']].map(([v,l]) => `<option value="${v}" ${quality === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>` + state.dimensions.map((d,i) => {
     const value = a.payload.dimensions?.[d.id] || {}, codes = value.codes || [];
-    return `<details class="dimension" data-dimension="${d.id}" open><summary><span class="dim-number">${String(i+1).padStart(2,'0')}</span><span class="dim-title">${esc(d.label)}</span><span class="dim-indicator">${codes.length ? codes.length + ' selected' : ''}</span><span class="dim-chevron">›</span></summary><div class="dimension-body"><p>${esc(d.help)}</p><div class="chips" data-chips="${d.id}">${renderChips(codes)}</div><div class="code-row"><select data-pick-code="${d.id}" aria-label="Apply a ${esc(d.label.toLowerCase())} code">${codeOptions(d.id, codes)}</select>${d.id === 'behavior' ? '' : `<button class="quiet" data-propose="${d.id}">+ New code</button>`}</div></div></details>`;
+    return `<details class="dimension" data-dimension="${d.id}" open><summary><span class="dim-number">${String(i+1).padStart(2,'0')}</span><span class="dim-title">${esc(d.label)}</span><span class="dim-indicator">${codes.length ? codes.length + ' selected' : ''}</span><span class="dim-chevron">›</span></summary><div class="dimension-body"><p>${esc(d.help)}</p><div class="chips" data-chips="${d.id}">${renderChips(codes)}</div><div class="code-row"><select data-pick-code="${d.id}" aria-label="Apply a ${esc(d.label.toLowerCase())} code">${codeOptions(d.id, codes)}</select><button class="quiet" data-propose="${d.id}">+ New code</button></div></div></details>`;
   }).join('');
   updateCategoryGuides();
   if(a.migration_reviews?.length) $('#coding-fields').insertAdjacentHTML('afterbegin', `<aside class="migration-warning"><strong>Vocabulary migration review</strong><p>Your reading status has not changed. Legacy selections are preserved pending review.</p><ul>${a.migration_reviews.map(x=>`<li>${esc(x.legacy_name)}: ${esc(x.reason)}</li>`).join('')}</ul></aside>`);
@@ -174,7 +174,7 @@ async function loadCodes() {
 }
 function renderCodebook() {
   const dimension = $('#codebook-dimension').value;
-  $('#new-code').disabled = !dimension || dimension === 'behavior';
+  $('#new-code').disabled = !dimension;
   $('#new-code').title = dimension ? 'Add a code to this dimension' : 'Select a dimension first';
   const codes = state.codes.filter(c => state.dimensions.some(d => d.id === c.dimension) && (!dimension || c.dimension === dimension) && c.status !== 'retired');
   $('#codebook-list').innerHTML = codes.length ? codes.map(c => `<article class="code-card"><div class="code-card-top"><p class="eyebrow">${esc(state.dimensions.find(d => d.id === c.dimension)?.label)}</p></div><h2>${esc(c.name)}</h2><p>${esc(c.definition)}</p><dl>${[['include_rule','Include when'],['exclude_rule','Exclude when'],['example','Example / boundary case']].filter(([f]) => c[f]).map(([f,l]) => `<dt>${l}</dt><dd>${esc(c[f])}</dd>`).join('')}</dl><footer><span>${esc(c.author)} · version ${c.version}</span>${c.dimension !== 'behavior' && (state.user.role === 'admin' || (c.author_id === state.user.id && c.status === 'draft')) ? `<button class="quiet" data-edit-code="${c.id}">Rename</button>` : '<span>Shared code</span>'}</footer></article>`).join('') : `<div class="empty"><h3>${state.codes.length ? 'No codes match these filters.' : 'Let the responses shape the codebook.'}</h3><p>${state.codes.length ? 'Choose another dimension.' : 'Read a few responses, then add a code when a useful distinction appears.'}</p></div>`;
@@ -184,7 +184,7 @@ function openCode(dimension, id = null) {
   if (!code && !dimension) return notice('Choose a dimension in the codebook filter first, or use New code inside a reading dimension.');
   form.reset();
   form.elements.dimension.value = code?.dimension || dimension;
-  if (form.elements.dimension.value === 'behavior') return notice('Behavior labels are fixed. Use Other behavior with a short observation.');
+  if (code?.dimension === 'behavior') return notice('Existing behavior labels are protected. Add a new code for a new distinction.');
   $('#code-dimension-label').textContent = state.dimensions.find(d => d.id === form.elements.dimension.value)?.label;
   for (const field of ['id','version','name']) form.elements[field].value = code?.[field] ?? '';
   $('.form-error', form).textContent = ''; $('#code-dialog-title').textContent = code ? 'Rename code' : 'New code';

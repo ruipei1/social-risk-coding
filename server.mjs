@@ -209,14 +209,15 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
           });
           return json({ version: version + 1, updated });
         }
-        if (req.method === 'GET' && path === '/api/codes') return json(db.prepare('SELECT c.*,u.name author FROM codes c JOIN users u ON u.id=c.author_id ORDER BY c.dimension,c.name').all());
+        if (req.method === 'GET' && path === '/api/codes') return json(db.prepare(`SELECT c.*,u.name author FROM codes c JOIN users u ON u.id=c.author_id ORDER BY c.dimension,CASE WHEN c.dimension='behavior' AND c.name='Other behavior' THEN 1 ELSE 0 END,c.name`).all());
         if ((req.method === 'POST' || req.method === 'PUT') && /^\/api\/codes(?:\/\d+)?$/.test(path)) {
           const input = await body(req), id = req.method === 'PUT' ? Number(path.split('/').pop()) : null;
           check(DIM_IDS.includes(input.dimension), 'Invalid dimension.');
-          check(input.dimension !== 'behavior', 'The 19 behavior labels and definitions are versioned and fixed. Use Other behavior with an observation for an uncovered action.', 403);
+          check(input.dimension !== 'behavior' || !id, 'Existing behavior labels are protected. Add a new code for a new distinction.', 403);
           input.status ??= 'draft';
           const name = str(input.name, 100).trim(), definition = str(input.definition || '');
           check(name, 'A code name is required.');
+          if (input.dimension === 'behavior') check(!db.prepare('SELECT id FROM codes WHERE dimension=? AND lower(trim(name))=lower(?)').get('behavior', name), 'This behavior name already exists, including retired labels. Choose a distinct name.', 409);
           check(['draft', 'active', 'retired'].includes(input.status), 'Invalid code status.');
           const values = [input.dimension, name, definition, str(input.include_rule || ''), str(input.exclude_rule || ''), str(input.example || ''), input.status];
           let savedId;
@@ -233,7 +234,7 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
             } else {
               check(user.role === 'admin' || input.status === 'draft', 'New codes from coders must be drafts.', 403);
               savedId = Number(db.prepare('INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated) VALUES (?,?,?,?,?,?,?,?,?,?)').run(...values, user.id, version, timestamp()).lastInsertRowid);
-              const family = input.dimension === 'behavior' ? str(input.family || '', 100).trim() : '';
+              const family = '';
               db.prepare('UPDATE codes SET family=? WHERE id=?').run(family, savedId);
             }
             db.prepare('INSERT INTO history(entity,entity_id,user_id,version,payload,created) VALUES (?,?,?,?,?,?)').run('code', String(savedId), user.id, version, JSON.stringify(input), timestamp());
