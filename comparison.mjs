@@ -16,16 +16,20 @@ export function compareReadings(readings, { includeDrafts = false } = {}) {
       differingIds: sets.length < 2 ? [] : union.filter(id => !sets.every(s => s.includes(id))) };
   }
   fields.response_quality = { differs: eligible.length >= 2 && new Set(eligible.map(r => r.response_quality)).size > 1 };
-  const disagreement = Object.values(fields).some(f => f.differs);
+  // Agreement is intentionally behavior-only. Other dimensions and response
+  // quality remain available for side-by-side review, but never affect the
+  // agreement result, filters, or threshold assessment.
+  const eligibleBehaviorSets = eligible.map(r => [...new Set(r.dimensions.behavior.map(c => c.id))].sort((a,b) => a-b));
   const completedBehaviorSets = completed.map(r => [...new Set(r.dimensions.behavior.map(c => c.id))].sort((a,b) => a-b));
   const behaviorResult = completed.length < 2 ? 'insufficient' : new Set(completedBehaviorSets.map(JSON.stringify)).size > 1 ? 'disagreement' : 'consistent';
+  const result = eligible.length < 2 ? 'insufficient' : new Set(eligibleBehaviorSets.map(JSON.stringify)).size > 1 ? 'disagreement' : 'consistent';
   return { fields, eligibleCoderIds: eligible.map(r => r.coder_id),
     behaviorAgreement: { result:behaviorResult, eligibleCoderIds:completed.map(r=>r.coder_id) },
-    result: eligible.length < 2 ? 'insufficient' : disagreement ? 'disagreement' : 'consistent',
+    result,
     observationsDiffer: eligible.length >= 2 && new Set(eligible.map(r => r.observations)).size > 1,
     missing: readings.filter(r => !r.saved).length,
     unfinished: readings.filter(r => r.saved && r.status !== 'complete').length,
-    noLabels: eligible.length >= 2 && eligible.every(r => DIMENSIONS.every(d => r.dimensions[d.id].length === 0)) };
+    noLabels: eligible.length >= 2 && eligible.every(r => r.dimensions.behavior.length === 0) };
 }
 
 export function comparisonUsers(db, batchId = null) {

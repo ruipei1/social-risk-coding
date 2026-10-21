@@ -267,10 +267,9 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
           const summary = { total:rows.length, disagreement:0, consistent:0, insufficient:0 };
           for (const row of rows) summary[row.result]++;
           const behaviorComparable=rows.filter(row=>row.behaviorAgreement.result!=='insufficient'),behaviorMatched=behaviorComparable.filter(row=>row.behaviorAgreement.result==='consistent').length;
-          const fullComparable=summary.consistent+summary.disagreement;
           const percent=(matched,comparable)=>comparable?Math.round(matched/comparable*1000)/10:null;
           const behaviorPercent=percent(behaviorMatched,behaviorComparable.length);
-          const agreement={behavior:{matched:behaviorMatched,comparable:behaviorComparable.length,percent:behaviorPercent,threshold:80,passed:behaviorPercent==null?null:behaviorPercent>=80},fullRecord:{matched:summary.consistent,comparable:fullComparable,percent:percent(summary.consistent,fullComparable)}};
+          const agreement={behavior:{matched:behaviorMatched,comparable:behaviorComparable.length,percent:behaviorPercent,threshold:80,passed:behaviorPercent==null?null:behaviorPercent>=80}};
           const selected = rows.filter(r => (filter === 'all' || r.result === filter) &&
             (!q || [r.response.text,r.response.participant_label,r.response.prompt].some(s => s.toLowerCase().includes(q))));
           return json({batch,coders,selectedCoderIds:coderIds || coders.map(coder => coder.id),summary,agreement,total:selected.length,offset,limit:20,rows:selected.slice(offset,offset+20)});

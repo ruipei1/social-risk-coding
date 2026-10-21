@@ -173,6 +173,7 @@ test('comparison is admin-only and distinguishes disagreements from missing read
   assert.equal((await s.request('/api/comparison')).status,401);
   assert.equal((await s.request('/api/comparison',a)).status,403);
   const behaviorId=Number(s.db.prepare("INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated,family) VALUES ('behavior','Taking on a new or challenging activity','','','','','active',1,1,'test','')").run().lastInsertRowid);
+  const whoId=Number(s.db.prepare("INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated,family) VALUES ('who','Friend','','','','','draft',1,1,'test','')").run().lastInsertRowid);
   const c={data:{id:behaviorId}};
   const one=annotation();one.status='complete';one.payload.dimensions.behavior={codes:[c.data.id]};
   const id='test-record:general_self_approach';
@@ -193,15 +194,17 @@ test('comparison is admin-only and distinguishes disagreements from missing read
   const oneCoder=(await s.request(`/api/comparison?coders=${coderA.coder_id}`,admin)).data;
   assert.equal(oneCoder.rows[0].readings.length,1);assert.equal(oneCoder.rows[0].result,'insufficient');assert.equal(oneCoder.rows[0].fields.behavior.differs,false);
   assert.equal((await s.request('/api/comparison?coders=',admin)).status,400);assert.equal((await s.request('/api/comparison?coders=999999',admin)).status,400);
-  const correction={version:coderB.version,status:'complete',payload:{response_quality:'substantive',dimensions:{behavior:{codes:[c.data.id]},who:{codes:[]},setting:{codes:[]}},memos:{observations:'Reviewed together.'}}};
+  const correction={version:coderB.version,status:'complete',payload:{response_quality:'substantive',dimensions:{behavior:{codes:[c.data.id]},who:{codes:[whoId]},setting:{codes:[]}},memos:{observations:'Reviewed together.'}}};
   const editPath=`/api/comparison/annotation/${coderB.coder_id}/${encodeURIComponent(id)}`;
   assert.equal((await s.request(editPath,{...a,method:'PUT',body:correction})).status,403);
   assert.equal((await s.request(editPath,{...admin,method:'PUT',body:correction})).status,200);
   assert.equal((await s.request(editPath,{...admin,method:'PUT',body:correction})).status,409);
   result=(await s.request('/api/comparison',admin)).data;
-  assert.equal(result.rows[0].result,'consistent');assert.equal(result.rows[0].fields.behavior.differs,false);
+  assert.equal(result.rows[0].result,'consistent');assert.equal(result.rows[0].fields.behavior.differs,false);assert.equal(result.rows[0].fields.who.differs,true);
   assert.deepEqual(result.agreement.behavior,{matched:1,comparable:1,percent:100,threshold:80,passed:true});
-  assert.deepEqual(result.agreement.fullRecord,{matched:1,comparable:1,percent:100});
+  assert.equal(result.agreement.fullRecord,undefined);
+  assert.equal((await s.request('/api/comparison?filter=disagreement',admin)).data.total,0);
+  assert.equal((await s.request('/api/comparison?filter=consistent',admin)).data.total,1);
   const corrected=result.rows[0].readings.find(r=>r.username==='coder-b');
   assert.deepEqual(corrected.dimensions.behavior.map(code=>code.id),[c.data.id]);assert.equal(corrected.observations,'Reviewed together.');assert.equal(corrected.version,2);
   const audit=s.db.prepare("SELECT * FROM history WHERE entity='annotation_admin_edit'").get();
