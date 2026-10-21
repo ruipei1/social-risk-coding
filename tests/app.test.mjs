@@ -96,6 +96,16 @@ test('unread responses default Who is involved to Unspecified without writing an
 test('CSRF, fabricated quotations, and cross-dimension codes are rejected',async()=>{
  const s=setup();try{const a=await s.login('coder-a','coder-a-test-password'),id='test-record:general_self_approach';assert.equal((await s.request('/api/annotation/'+id,{cookie:a.cookie,method:'PUT',body:annotation()})).status,403);assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:annotation('note','Invented quote')})).status,400);const c=await s.request('/api/codes',{...a,method:'POST',body:code()});const data=annotation();data.payload.dimensions.behavior={codes:[c.data.id]};assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:data})).status,400);assert.equal((await s.request('/api/annotation/'+id,{...a,method:'PUT',body:annotation('note','stayed home.')})).status,200);}finally{s.close();}
 });
+test('Unspecified consequence cannot be combined with a named consequence',async()=>{
+ const s=setup();try{
+  const coder=await s.login('coder-a','coder-a-test-password');
+  const unspecified=await s.request('/api/codes',{...coder,method:'POST',body:{dimension:'anticipated_interpersonal_consequence',name:'Unspecified'}}),judgment=await s.request('/api/codes',{...coder,method:'POST',body:{dimension:'anticipated_interpersonal_consequence',name:'Judgment'}});
+  const a=annotation();a.payload.dimensions.anticipated_interpersonal_consequence={codes:[unspecified.data.id,judgment.data.id]};
+  assert.equal((await s.request('/api/annotation/test-record:general_self_approach',{...coder,method:'PUT',body:a})).status,400);
+  a.payload.dimensions.anticipated_interpersonal_consequence.codes=[unspecified.data.id];
+  assert.equal((await s.request('/api/annotation/test-record:general_self_approach',{...coder,method:'PUT',body:a})).status,200);
+ }finally{s.close();}
+});
 test('RAs may propose drafts; only admins may approve or change another coder’s definition',async()=>{
  const s=setup();try{const a=await s.login('coder-a','coder-a-test-password'),b=await s.login('coder-b','coder-b-test-password'),admin=await s.login('admin','administrator-test-password');const r=await s.request('/api/codes',{...a,method:'POST',body:code()});assert.equal(r.status,200);assert.equal((await s.request('/api/codes',{...a,method:'POST',body:{...code('Other'),status:'active'}})).status,403);assert.equal((await s.request('/api/codes/'+r.data.id,{...b,method:'PUT',body:{...code(),version:1}})).status,403);assert.equal((await s.request('/api/codes/'+r.data.id,{...admin,method:'PUT',body:{...code(),version:1,status:'active'}})).status,200);assert.equal((await s.request('/api/codes/'+r.data.id,{...admin,method:'PUT',body:{...code(),version:1}})).status,409);}finally{s.close();}
 });
@@ -173,6 +183,7 @@ test('comparison is admin-only and distinguishes disagreements from missing read
   assert.equal((await s.request('/api/annotation/'+id,{...b,method:'PUT',body:two})).status,200);
   result=(await s.request('/api/comparison?filter=disagreement',admin)).data;
   assert.equal(result.total,1);assert.equal(result.rows[0].fields.behavior.differs,true);
+  assert.deepEqual(result.agreement.behavior,{matched:0,comparable:1,percent:0,threshold:80,passed:false});
   assert.equal(result.rows[0].missing,1);assert.deepEqual(result.rows[0].fields.behavior.differingIds,[c.data.id]);
   const coderA=result.rows[0].readings.find(r=>r.username==='coder-a');
   assert.equal(coderA.dimensions.behavior[0].name,'Taking on a new or challenging activity');
@@ -189,6 +200,8 @@ test('comparison is admin-only and distinguishes disagreements from missing read
   assert.equal((await s.request(editPath,{...admin,method:'PUT',body:correction})).status,409);
   result=(await s.request('/api/comparison',admin)).data;
   assert.equal(result.rows[0].result,'consistent');assert.equal(result.rows[0].fields.behavior.differs,false);
+  assert.deepEqual(result.agreement.behavior,{matched:1,comparable:1,percent:100,threshold:80,passed:true});
+  assert.deepEqual(result.agreement.fullRecord,{matched:1,comparable:1,percent:100});
   const corrected=result.rows[0].readings.find(r=>r.username==='coder-b');
   assert.deepEqual(corrected.dimensions.behavior.map(code=>code.id),[c.data.id]);assert.equal(corrected.observations,'Reviewed together.');assert.equal(corrected.version,2);
   const audit=s.db.prepare("SELECT * FROM history WHERE entity='annotation_admin_edit'").get();
