@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { chmodSync } from 'node:fs';
 import { transaction, timestamp, hash } from './model.mjs';
-import { CODEBOOK_VERSION, BEHAVIOR_CODES, DIRECT_MAPPING, CONTEXT_LABELS } from './behavior-vocabulary.mjs';
+import { CODEBOOK_VERSION, PREVIOUS_CODEBOOK_VERSION, BEHAVIOR_CODES, DIRECT_MAPPING, CONTEXT_LABELS } from './behavior-vocabulary.mjs';
 
 function historyFor(db,row) {
  return db.prepare("SELECT id,entity,user_id,payload FROM history WHERE entity_id=? AND entity LIKE 'annotation%' ORDER BY id").all(row.response_id).filter(h=>{
@@ -29,6 +29,7 @@ export function migrateBehavior(db,author) {
  if(!db.prepare("SELECT id FROM users WHERE id=? AND role='admin'").get(author))throw new Error('Administrator required.');
  const existing=db.prepare("SELECT name FROM sqlite_master WHERE name='behavior_migrations'").get();
  if(existing&&db.prepare('SELECT version FROM behavior_migrations WHERE version=?').get(CODEBOOK_VERSION))return {version:CODEBOOK_VERSION,already_applied:true};
+ const targeted=!!(existing&&db.prepare('SELECT version FROM behavior_migrations WHERE version=?').get(PREVIOUS_CODEBOOK_VERSION));
  // Snapshot committed WAL content before any vocabulary/schema mutation. Fail closed on backup failure.
  const file=db.prepare('PRAGMA database_list').all().find(x=>x.name==='main').file;
  const backup=file?`${file}.before-${CODEBOOK_VERSION}-${randomUUID()}.sqlite`:null;
@@ -36,6 +37,28 @@ export function migrateBehavior(db,author) {
  return transaction(db,()=>{
  db.exec(`CREATE TABLE IF NOT EXISTS behavior_migrations(version TEXT PRIMARY KEY,applied TEXT NOT NULL,backup TEXT,report TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS behavior_reviews(response_id TEXT NOT NULL,user_id INTEGER NOT NULL,batch_id INTEGER NOT NULL,legacy_code_id INTEGER NOT NULL,legacy_name TEXT NOT NULL,reason TEXT NOT NULL,evidence TEXT NOT NULL,version TEXT NOT NULL,resolved_at TEXT,resolution TEXT,PRIMARY KEY(response_id,user_id,batch_id,legacy_code_id));`);
+ if(targeted){
+  const annotations=db.prepare('SELECT * FROM annotations ORDER BY response_id,user_id,batch_id').all(),responses=db.prepare('SELECT * FROM responses ORDER BY id').all(),nonbehavior=db.prepare("SELECT * FROM codes WHERE dimension!='behavior' ORDER BY id").all();
+  const canonicalNames=new Set(BEHAVIOR_CODES.map(code=>code.name));
+  const custom=()=>db.prepare("SELECT * FROM codes WHERE dimension='behavior' ORDER BY id").all().filter(code=>!canonicalNames.has(code.name));
+  const oldHistory=db.prepare('SELECT * FROM history ORDER BY id').all(),before={annotations:hash(JSON.stringify(annotations)),responses:hash(JSON.stringify(responses)),nonbehavior:hash(JSON.stringify(nonbehavior)),custom_behaviors:hash(JSON.stringify(custom())),history_digest:hash(JSON.stringify(oldHistory))};
+  const changed=[];
+  for(const spec of BEHAVIOR_CODES){
+   const prior=db.prepare("SELECT * FROM codes WHERE dimension='behavior' AND name=?").get(spec.name);
+   if(!prior)throw new Error(`Version ${PREVIOUS_CODEBOOK_VERSION} is missing canonical behavior ${spec.name}`);
+   const fields=['definition','include_rule','exclude_rule','example','family','status'],values={...spec,family:'',status:'active'};
+   if(fields.every(field=>prior[field]===values[field]))continue;
+   const updated=timestamp();record(db,'code_before_definition_migration',prior.id,author,prior.version,{...prior,codebook_version:CODEBOOK_VERSION});
+   db.prepare("UPDATE codes SET definition=?,include_rule=?,exclude_rule=?,example=?,family='',status='active',version=version+1,updated=? WHERE id=?").run(spec.definition,spec.include_rule,spec.exclude_rule,spec.example,updated,prior.id);
+   const saved=db.prepare('SELECT * FROM codes WHERE id=?').get(prior.id);record(db,'code',prior.id,author,saved.version,{...saved,codebook_version:CODEBOOK_VERSION});
+   changed.push({id:prior.id,name:prior.name,previous_version:prior.version,version:saved.version});
+  }
+  const after={annotations:hash(JSON.stringify(db.prepare('SELECT * FROM annotations ORDER BY response_id,user_id,batch_id').all())),responses:hash(JSON.stringify(db.prepare('SELECT * FROM responses ORDER BY id').all())),nonbehavior:hash(JSON.stringify(db.prepare("SELECT * FROM codes WHERE dimension!='behavior' ORDER BY id").all())),custom_behaviors:hash(JSON.stringify(custom())),history_digest:hash(JSON.stringify(db.prepare('SELECT * FROM history WHERE id<=? ORDER BY id').all(oldHistory.at(-1)?.id??0)))};
+  if(Object.keys(before).some(key=>before[key]!==after[key]))throw new Error('Targeted vocabulary preservation check failed.');
+  const report={version:CODEBOOK_VERSION,from_version:PREVIOUS_CODEBOOK_VERSION,targeted:true,changed_definitions:changed,before,after,selectable:db.prepare("SELECT count(*) n FROM codes WHERE dimension='behavior' AND status!='retired'").get().n};
+  db.prepare('INSERT INTO behavior_migrations VALUES (?,?,?,?)').run(CODEBOOK_VERSION,timestamp(),backup,JSON.stringify(report));record(db,'codebook_migration',CODEBOOK_VERSION,author,1,report);
+  return report;
+ }
  const old=db.prepare("SELECT * FROM codes WHERE dimension='behavior' ORDER BY id").all(),oldMap=new Map(old.map(c=>[c.id,c]));
  const annotations=db.prepare('SELECT * FROM annotations ORDER BY response_id,user_id,batch_id').all();
  const stable=a=>{const p=JSON.parse(a.payload);if(p.dimensions?.behavior)p.dimensions.behavior.codes=[];return {response_id:a.response_id,user_id:a.user_id,batch_id:a.batch_id,status:a.status,payload:p};};

@@ -290,7 +290,10 @@ async function loadComparison() {
     comparisonRows = data.rows;
     renderComparisonCoders(data.coders, data.selectedCoderIds);
     const selectedLabel = `${data.selectedCoderIds.length} coder${data.selectedCoderIds.length === 1 ? '' : 's'} selected`;
-    $('#comparison-summary').textContent = `${selectedLabel} · ${data.summary.total} response${data.summary.total === 1 ? '' : 's'} with saved coding · ${data.summary.disagreement} disagreements · ${data.summary.consistent} consistent · ${data.summary.insufficient} with fewer than two compared readings`;
+    const behavior=data.agreement.behavior,full=data.agreement.fullRecord;
+    const behaviorLabel=behavior.comparable?`${behavior.matched}/${behavior.comparable} (${behavior.percent.toFixed(1)}%) · ${behavior.passed?'PASS':'BELOW THRESHOLD'} at ${behavior.threshold}%`:'not enough completed overlapping readings';
+    const fullLabel=full.comparable?`${full.matched}/${full.comparable} (${full.percent.toFixed(1)}%)`:'not enough comparable readings';
+    $('#comparison-summary').textContent = `${selectedLabel} · Behavior agreement: ${behaviorLabel} · Full-record agreement: ${fullLabel} · ${data.summary.insufficient} with fewer than two compared readings`;
     const quality = {substantive:'Substantive response',no_example:'No example recalled / not applicable',ambiguous:'Too ambiguous to interpret',off_topic:'Off topic',blank:'Blank response'};
     $('#comparison-results').innerHTML = data.rows.map(item => {
       const resultLabel = {disagreement:'Disagreement',consistent:'Consistent among compared coders',insufficient:'Not enough readings to compare'}[item.result];
@@ -321,7 +324,7 @@ function openComparisonEditor(responseId, coderId) {
   $('#comparison-edit-dimensions').innerHTML = state.dimensions.map(d => {
     const selected = new Set(reading.dimensions[d.id].map(c => c.id));
     const codes = state.codes.filter(c => c.dimension === d.id && (c.status !== 'retired' || selected.has(c.id)));
-    return `<fieldset class="comparison-edit-dimension"><legend>${esc(d.label)}</legend><p class="muted small">${esc(d.help)}</p><div class="comparison-edit-codes">${codes.map(c => `<label><input type="checkbox" name="codes_${d.id}" value="${c.id}" ${selected.has(c.id) ? 'checked' : ''}><span>${esc(c.name)}${c.status === 'retired' ? '<small>Legacy assignment · migration review</small>' : ''}</span></label>`).join('') || '<p class="muted">No codes are available for this dimension.</p>'}</div></fieldset>`;
+    return `<fieldset class="comparison-edit-dimension"><legend>${esc(d.label)}</legend><p class="muted small">${esc(d.help)}</p><div class="comparison-edit-codes">${codes.map(c => `<label><input type="checkbox" data-comparison-code="${d.id}" name="codes_${d.id}" value="${c.id}" ${selected.has(c.id) ? 'checked' : ''}><span>${esc(c.name)}${c.status === 'retired' ? '<small>Legacy assignment · migration review</small>' : ''}</span></label>`).join('') || '<p class="muted">No codes are available for this dimension.</p>'}</div></fieldset>`;
   }).join('');
   $('.form-error', form).textContent = '';
   $('#comparison-edit-dialog').showModal();
@@ -335,6 +338,14 @@ $('#comparison-edit-form').onsubmit = async e => {
     $('#comparison-edit-dialog').close(); notice('Saved administrative correction. Comparison results have been recalculated.');
     await loadComparison();
   } catch (error) { $('.form-error', form).textContent = error.message; } finally { button.disabled = false; }
+};
+$('#comparison-edit-form').onchange = e => {
+  if(!e.target.matches('[data-comparison-code]:checked'))return;
+  const dimension=e.target.dataset.comparisonCode;
+  if(!['who','anticipated_interpersonal_consequence'].includes(dimension))return;
+  const inputs=$$(`input[data-comparison-code="${dimension}"]`,e.currentTarget),picked=state.codes.find(code=>code.id===Number(e.target.value));
+  if(picked?.name==='Unspecified')for(const input of inputs)if(input!==e.target)input.checked=false;
+  else for(const input of inputs){const code=state.codes.find(item=>item.id===Number(input.value));if(code?.name==='Unspecified')input.checked=false;}
 };
 for (const id of ['comparison-filter','comparison-scope']) $('#'+id).addEventListener('change', () => { comparisonOffset=0; loadComparison(); });
 $('#comparison-search').addEventListener('change', () => { comparisonOffset=0; loadComparison(); });

@@ -13,5 +13,10 @@ test('unfinished and missing readings are not negative judgments',()=>{
 });
 test('response quality disagreement and empty-set agreement are explicit',()=>{
  assert.equal(compareReadings([reading(1),reading(2,[],'complete','blank')]).fields.response_quality.differs,true);
+ const quality=compareReadings([reading(1),reading(2,[],'complete','blank')]);assert.equal(quality.behaviorAgreement.result,'consistent');
  const result=compareReadings([reading(1),reading(2)]);assert.equal(result.result,'consistent');assert.equal(result.noLabels,true);
+});
+test('behavior agreement always uses completed overlapping readings',()=>{
+ const result=compareReadings([reading(1,[1]),reading(2,[1]),reading(3,[2],'draft')],{includeDrafts:true});
+ assert.equal(result.result,'disagreement');assert.equal(result.behaviorAgreement.result,'consistent');assert.deepEqual(result.behaviorAgreement.eligibleCoderIds,[1,2]);
 });

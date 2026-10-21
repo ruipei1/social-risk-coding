@@ -4,8 +4,8 @@ import { readFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDB, addUser } from '../model.mjs';
-import { seedStarterCodebook } from '../starter-codebook.mjs';
-import { BEHAVIOR_CODES, CODEBOOK_VERSION } from '../behavior-vocabulary.mjs';
+import { seedStarterCodebook, CONSEQUENCE_GUIDE_VERSION } from '../starter-codebook.mjs';
+import { BEHAVIOR_CODES, CODEBOOK_VERSION, PREVIOUS_CODEBOOK_VERSION } from '../behavior-vocabulary.mjs';
 import { migrateBehavior, codebookReport } from '../behavior-migration.mjs';
 function fixture(db, names){
  const admin=addUser(db,'admin','Admin','long-admin-password','admin'),coder=addUser(db,'coder','Coder','long-coder-password');
@@ -49,6 +49,37 @@ test('disk database is backed up before migration and backup keeps old vocabular
 });
 test('transaction rolls back all changes if a selected behavior is invalid',()=>{
  const db=openDB(':memory:');try{const {admin}=fixture(db,['Asking for help']);db.prepare("UPDATE annotations SET payload=?").run(JSON.stringify({dimensions:{behavior:{codes:[99999]}}}));assert.throws(()=>migrateBehavior(db,admin),/Unknown selected behavior/);assert.equal(db.prepare("SELECT count(*) n FROM codes WHERE dimension='behavior'").get().n,1);assert.equal(db.prepare("SELECT count(*) n FROM history").get().n,0);}finally{db.close();}
+});
+
+test('v7 updates definitions without changing v6 annotations or researcher-added behaviors',()=>{
+ const db=openDB(':memory:');try{
+  const admin=addUser(db,'v7-admin','V7 Admin','long-admin-password','admin'),now='before';
+  const insert=db.prepare("INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated,family) VALUES ('behavior',?,?,?,?,?,'active',?,1,?,'')");
+  for(const spec of BEHAVIOR_CODES){
+   const include=spec.name==='Other behavior'?'Use for an established action not covered above. Online communication or AI use without an established function can go here.':spec.include_rule;
+   insert.run(spec.name,spec.definition,include,spec.exclude_rule,spec.example,admin,now);
+  }
+  const custom=Number(db.prepare("INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated,family) VALUES ('behavior','Researcher distinction','','','','','draft',?,1,?,'')").run(admin,now).lastInsertRowid);
+  db.prepare('INSERT INTO responses VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run('v7-r','record','person','P001',1,'social_self_avoid','social','self','avoid','source','pool','wave',1,'A preserved response.',0);
+  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?)').run('v7-r',admin,1,'complete',JSON.stringify({dimensions:{behavior:{codes:[custom]}},memos:{observations:'Keep me'},response_quality:'substantive'}),2,now);
+  db.exec('CREATE TABLE behavior_migrations(version TEXT PRIMARY KEY,applied TEXT NOT NULL,backup TEXT,report TEXT NOT NULL)');
+  db.prepare('INSERT INTO behavior_migrations VALUES (?,?,?,?)').run(PREVIOUS_CODEBOOK_VERSION,now,null,'{}');
+  const before=db.prepare('SELECT * FROM annotations').get(),report=migrateBehavior(db,admin);
+  assert.equal(report.targeted,true);assert.equal(report.from_version,PREVIOUS_CODEBOOK_VERSION);
+  assert.deepEqual(db.prepare('SELECT * FROM annotations').get(),before);assert.equal(db.prepare('SELECT status FROM codes WHERE id=?').get(custom).status,'draft');
+  assert.doesNotMatch(db.prepare("SELECT include_rule FROM codes WHERE name='Other behavior'").get().include_rule,/AI use without/);
+  const history=db.prepare('SELECT * FROM history ORDER BY id').all();assert.equal(migrateBehavior(db,admin).already_applied,true);assert.deepEqual(db.prepare('SELECT * FROM history ORDER BY id').all(),history);
+ }finally{db.close();}
+});
+
+test('consequence guide migration adds Unspecified, defines Other, and is idempotent',()=>{
+ const db=openDB(':memory:');try{
+  const admin=addUser(db,'consequence-admin','Consequence Admin','long-admin-password','admin');
+  db.prepare("INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated,family) VALUES ('anticipated_interpersonal_consequence','Other','','','','','draft',?,1,'before','')").run(admin);
+  const first=seedStarterCodebook(db,admin),unspecified=db.prepare("SELECT * FROM codes WHERE dimension='anticipated_interpersonal_consequence' AND name='Unspecified'").get(),other=db.prepare("SELECT * FROM codes WHERE dimension='anticipated_interpersonal_consequence' AND name='Other'").get();
+  assert.equal(first.consequence_guide.version,CONSEQUENCE_GUIDE_VERSION);assert.match(unspecified.definition,/implied/);assert.match(unspecified.exclude_rule,/Leave this dimension empty/);assert.match(other.definition,/specific/);
+  const history=db.prepare('SELECT * FROM history ORDER BY id').all();assert.equal(seedStarterCodebook(db,admin).consequence_guide.already_applied,true);assert.deepEqual(db.prepare('SELECT * FROM history ORDER BY id').all(),history);
+ }finally{db.close();}
 });
 
 test('review resolution is version-checked, supports distinct actions and preserves prior batch status/notes',async()=>{

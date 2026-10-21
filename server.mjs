@@ -72,6 +72,10 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
         check(code, 'Code does not belong to this dimension.');
         if(d==='behavior' && code.status==='retired') check((previous.dimensions?.behavior?.codes || []).includes(id), 'Retired behaviors cannot be newly selected.');
       }
+      if(['who','anticipated_interpersonal_consequence'].includes(d)){
+        const unspecified=db.prepare("SELECT id FROM codes WHERE dimension=? AND name='Unspecified' AND status!='retired'").get(d)?.id;
+        check(!unspecified||!codes.includes(unspecified)||new Set(codes).size===1,'Unspecified cannot be combined with named labels in this dimension.');
+      }
       const evidence = item.evidence || 'unreviewed';
       check(['unreviewed', 'explicit', 'inferred', 'not_stated', 'unclear', 'mixed'].includes(evidence), 'Invalid evidence status.');
       result.dimensions[d] = { note: str(item.note || ''), quote: str(item.quote || ''), evidence, codes: [...new Set(codes)] };
@@ -262,9 +266,14 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
           const rows = comparisonData(db, {includeDrafts:scope === 'all',coderIds,batchId:batch.id});
           const summary = { total:rows.length, disagreement:0, consistent:0, insufficient:0 };
           for (const row of rows) summary[row.result]++;
+          const behaviorComparable=rows.filter(row=>row.behaviorAgreement.result!=='insufficient'),behaviorMatched=behaviorComparable.filter(row=>row.behaviorAgreement.result==='consistent').length;
+          const fullComparable=summary.consistent+summary.disagreement;
+          const percent=(matched,comparable)=>comparable?Math.round(matched/comparable*1000)/10:null;
+          const behaviorPercent=percent(behaviorMatched,behaviorComparable.length);
+          const agreement={behavior:{matched:behaviorMatched,comparable:behaviorComparable.length,percent:behaviorPercent,threshold:80,passed:behaviorPercent==null?null:behaviorPercent>=80},fullRecord:{matched:summary.consistent,comparable:fullComparable,percent:percent(summary.consistent,fullComparable)}};
           const selected = rows.filter(r => (filter === 'all' || r.result === filter) &&
             (!q || [r.response.text,r.response.participant_label,r.response.prompt].some(s => s.toLowerCase().includes(q))));
-          return json({batch,coders,selectedCoderIds:coderIds || coders.map(coder => coder.id),summary,total:selected.length,offset,limit:20,rows:selected.slice(offset,offset+20)});
+          return json({batch,coders,selectedCoderIds:coderIds || coders.map(coder => coder.id),summary,agreement,total:selected.length,offset,limit:20,rows:selected.slice(offset,offset+20)});
         }
         if (req.method === 'PUT' && path.startsWith('/api/comparison/annotation/')) {
           admin();

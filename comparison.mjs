@@ -7,6 +7,7 @@ import { observationsText } from './public/memos.js';
 // Compare saved code-ID sets, never label text, order, or unread placeholders.
 export function compareReadings(readings, { includeDrafts = false } = {}) {
   const eligible = readings.filter(r => r.saved && (includeDrafts || r.status === 'complete'));
+  const completed = readings.filter(r => r.saved && r.status === 'complete');
   const fields = {};
   for (const { id } of DIMENSIONS) {
     const sets = eligible.map(r => [...new Set(r.dimensions[id].map(c => c.id))].sort((a,b) => a-b));
@@ -16,7 +17,10 @@ export function compareReadings(readings, { includeDrafts = false } = {}) {
   }
   fields.response_quality = { differs: eligible.length >= 2 && new Set(eligible.map(r => r.response_quality)).size > 1 };
   const disagreement = Object.values(fields).some(f => f.differs);
+  const completedBehaviorSets = completed.map(r => [...new Set(r.dimensions.behavior.map(c => c.id))].sort((a,b) => a-b));
+  const behaviorResult = completed.length < 2 ? 'insufficient' : new Set(completedBehaviorSets.map(JSON.stringify)).size > 1 ? 'disagreement' : 'consistent';
   return { fields, eligibleCoderIds: eligible.map(r => r.coder_id),
+    behaviorAgreement: { result:behaviorResult, eligibleCoderIds:completed.map(r=>r.coder_id) },
     result: eligible.length < 2 ? 'insufficient' : disagreement ? 'disagreement' : 'consistent',
     observationsDiffer: eligible.length >= 2 && new Set(eligible.map(r => r.observations)).size > 1,
     missing: readings.filter(r => !r.saved).length,
