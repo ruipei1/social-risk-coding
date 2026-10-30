@@ -4,7 +4,18 @@ import { fileURLToPath } from 'node:url';
 import { DIMENSIONS } from './model.mjs';
 import { observationsText } from './public/memos.js';
 
-// Compare saved code-ID sets, never label text, order, or unread placeholders.
+const behaviorSet = reading => [...new Map(reading.dimensions.behavior.map(code => [code.id, code])).values()];
+const pairAcceptable = (one, two) => {
+  const a = behaviorSet(one), b = behaviorSet(two);
+  if (a.some(code => b.some(other => other.id === code.id))) return true;
+  if (!a.length && !b.length) return true;
+  const empty = !a.length ? one : !b.length ? two : null;
+  const labeled = empty === one ? two : empty === two ? one : null;
+  return !!empty && (labeled.response_quality === 'ambiguous' || behaviorSet(labeled).some(code => code.name === 'Other behavior'));
+};
+const allPairsAcceptable = readings => readings.every((one, index) => readings.slice(index + 1).every(two => pairAcceptable(one, two)));
+
+// Compare saved code-ID sets, never order, duplicates, or unread placeholders.
 export function compareReadings(readings, { includeDrafts = false } = {}) {
   const eligible = readings.filter(r => r.saved && (includeDrafts || r.status === 'complete'));
   const completed = readings.filter(r => r.saved && r.status === 'complete');
@@ -19,10 +30,8 @@ export function compareReadings(readings, { includeDrafts = false } = {}) {
   // Agreement is intentionally behavior-only. Other dimensions and response
   // quality remain available for side-by-side review, but never affect the
   // agreement result, filters, or threshold assessment.
-  const eligibleBehaviorSets = eligible.map(r => [...new Set(r.dimensions.behavior.map(c => c.id))].sort((a,b) => a-b));
-  const completedBehaviorSets = completed.map(r => [...new Set(r.dimensions.behavior.map(c => c.id))].sort((a,b) => a-b));
-  const behaviorResult = completed.length < 2 ? 'insufficient' : new Set(completedBehaviorSets.map(JSON.stringify)).size > 1 ? 'disagreement' : 'consistent';
-  const result = eligible.length < 2 ? 'insufficient' : new Set(eligibleBehaviorSets.map(JSON.stringify)).size > 1 ? 'disagreement' : 'consistent';
+  const behaviorResult = completed.length < 2 ? 'insufficient' : allPairsAcceptable(completed) ? 'consistent' : 'disagreement';
+  const result = eligible.length < 2 ? 'insufficient' : allPairsAcceptable(eligible) ? 'consistent' : 'disagreement';
   return { fields, eligibleCoderIds: eligible.map(r => r.coder_id),
     behaviorAgreement: { result:behaviorResult, eligibleCoderIds:completed.map(r=>r.coder_id) },
     result,

@@ -3,6 +3,16 @@ import { chmodSync } from 'node:fs';
 import { transaction, timestamp, hash } from './model.mjs';
 import { CODEBOOK_VERSION, PREVIOUS_CODEBOOK_VERSION, BEHAVIOR_CODES, DIRECT_MAPPING, CONTEXT_LABELS } from './behavior-vocabulary.mjs';
 
+const RENAMED_CODES = new Map([
+ ['Personal disclosure','Sharing something personal'],
+ ['Expressing opinions or disagreement','Expressing views'],
+ ['Confronting or addressing interpersonal conflict','Addressing an interpersonal problem'],
+ ['Defending, supporting, or intervening for others','Intervening for others'],
+ ['Engaging in harmful social behavior (lying, gossiping, or manipulation)','Engaging in harmful social behavior'],
+ ['Making an education or career decision','Making an education or work decision'],
+ ['Performing or posting publicly (online or in person)','Speaking or performing publicly']
+]);
+
 function historyFor(db,row) {
  return db.prepare("SELECT id,entity,user_id,payload FROM history WHERE entity_id=? AND entity LIKE 'annotation%' ORDER BY id").all(row.response_id).filter(h=>{
   const p=JSON.parse(h.payload);return (p.target_user_id ?? h.user_id)===row.user_id && (p.batch_id==null || p.batch_id===row.batch_id);
@@ -40,22 +50,31 @@ export function migrateBehavior(db,author) {
  if(targeted){
   const annotations=db.prepare('SELECT * FROM annotations ORDER BY response_id,user_id,batch_id').all(),responses=db.prepare('SELECT * FROM responses ORDER BY id').all(),nonbehavior=db.prepare("SELECT * FROM codes WHERE dimension!='behavior' ORDER BY id").all();
   const canonicalNames=new Set(BEHAVIOR_CODES.map(code=>code.name));
-  const custom=()=>db.prepare("SELECT * FROM codes WHERE dimension='behavior' ORDER BY id").all().filter(code=>!canonicalNames.has(code.name));
+  const priorCanonicalNames=new Set(RENAMED_CODES.values());
+  const custom=()=>db.prepare("SELECT * FROM codes WHERE dimension='behavior' ORDER BY id").all().filter(code=>!canonicalNames.has(code.name)&&!priorCanonicalNames.has(code.name));
   const oldHistory=db.prepare('SELECT * FROM history ORDER BY id').all(),before={annotations:hash(JSON.stringify(annotations)),responses:hash(JSON.stringify(responses)),nonbehavior:hash(JSON.stringify(nonbehavior)),custom_behaviors:hash(JSON.stringify(custom())),history_digest:hash(JSON.stringify(oldHistory))};
   const changed=[];
   for(const spec of BEHAVIOR_CODES){
-   const prior=db.prepare("SELECT * FROM codes WHERE dimension='behavior' AND name=?").get(spec.name);
-   if(!prior)throw new Error(`Version ${PREVIOUS_CODEBOOK_VERSION} is missing canonical behavior ${spec.name}`);
+   const previousName=RENAMED_CODES.get(spec.name);
+   const prior=db.prepare("SELECT * FROM codes WHERE dimension='behavior' AND name=?").get(spec.name) || (previousName?db.prepare("SELECT * FROM codes WHERE dimension='behavior' AND name=?").get(previousName):null);
+   if(!prior){
+    if(spec.name!=='Drawing attention to oneself or being put on the spot')throw new Error(`Version ${PREVIOUS_CODEBOOK_VERSION} is missing canonical behavior ${spec.name}`);
+    const updated=timestamp();
+    const id=Number(db.prepare("INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated,family) VALUES ('behavior',?,?,?,?,?,'active',?,1,?,'')").run(spec.name,spec.definition,spec.include_rule,spec.exclude_rule,spec.example,author,updated).lastInsertRowid);
+    const saved=db.prepare('SELECT * FROM codes WHERE id=?').get(id);record(db,'code',id,author,saved.version,{...saved,codebook_version:CODEBOOK_VERSION});
+    changed.push({id,name:spec.name,action:'added',version:saved.version});
+    continue;
+   }
    const fields=['definition','include_rule','exclude_rule','example','family','status'],values={...spec,family:'',status:'active'};
-   if(fields.every(field=>prior[field]===values[field]))continue;
+   if(prior.name===spec.name&&fields.every(field=>prior[field]===values[field]))continue;
    const updated=timestamp();record(db,'code_before_definition_migration',prior.id,author,prior.version,{...prior,codebook_version:CODEBOOK_VERSION});
-   db.prepare("UPDATE codes SET definition=?,include_rule=?,exclude_rule=?,example=?,family='',status='active',version=version+1,updated=? WHERE id=?").run(spec.definition,spec.include_rule,spec.exclude_rule,spec.example,updated,prior.id);
+   db.prepare("UPDATE codes SET name=?,definition=?,include_rule=?,exclude_rule=?,example=?,family='',status='active',version=version+1,updated=? WHERE id=?").run(spec.name,spec.definition,spec.include_rule,spec.exclude_rule,spec.example,updated,prior.id);
    const saved=db.prepare('SELECT * FROM codes WHERE id=?').get(prior.id);record(db,'code',prior.id,author,saved.version,{...saved,codebook_version:CODEBOOK_VERSION});
-   changed.push({id:prior.id,name:prior.name,previous_version:prior.version,version:saved.version});
+   changed.push({id:prior.id,name:saved.name,previous_name:prior.name,action:prior.name===saved.name?'updated':'renamed',previous_version:prior.version,version:saved.version});
   }
   const after={annotations:hash(JSON.stringify(db.prepare('SELECT * FROM annotations ORDER BY response_id,user_id,batch_id').all())),responses:hash(JSON.stringify(db.prepare('SELECT * FROM responses ORDER BY id').all())),nonbehavior:hash(JSON.stringify(db.prepare("SELECT * FROM codes WHERE dimension!='behavior' ORDER BY id").all())),custom_behaviors:hash(JSON.stringify(custom())),history_digest:hash(JSON.stringify(db.prepare('SELECT * FROM history WHERE id<=? ORDER BY id').all(oldHistory.at(-1)?.id??0)))};
   if(Object.keys(before).some(key=>before[key]!==after[key]))throw new Error('Targeted vocabulary preservation check failed.');
-  const report={version:CODEBOOK_VERSION,from_version:PREVIOUS_CODEBOOK_VERSION,targeted:true,changed_definitions:changed,before,after,selectable:db.prepare("SELECT count(*) n FROM codes WHERE dimension='behavior' AND status!='retired'").get().n};
+  const report={version:CODEBOOK_VERSION,from_version:PREVIOUS_CODEBOOK_VERSION,targeted:true,changed_definitions:changed,before,after,canonical:BEHAVIOR_CODES.length,selectable:db.prepare("SELECT count(*) n FROM codes WHERE dimension='behavior' AND status!='retired'").get().n};
   db.prepare('INSERT INTO behavior_migrations VALUES (?,?,?,?)').run(CODEBOOK_VERSION,timestamp(),backup,JSON.stringify(report));record(db,'codebook_migration',CODEBOOK_VERSION,author,1,report);
   return report;
  }
@@ -90,7 +109,7 @@ export function migrateBehavior(db,author) {
   const updated=timestamp();db.prepare('UPDATE annotations SET payload=?,version=version+1,updated=? WHERE response_id=? AND user_id=? AND batch_id=?').run(JSON.stringify(payload),updated,row.response_id,row.user_id,row.batch_id);changed++;
   record(db,'annotation_codebook_migration',row.response_id,author,row.version+1,{batch_id:row.batch_id,target_user_id:row.user_id,status:row.status,previous_payload:previous,payload,decisions,codebook_version:CODEBOOK_VERSION});
  }
- const report={version:CODEBOOK_VERSION,added,retired,annotations_migrated:changed,review_assignments:flagged,mapping,before,after:{preserved_annotations:hash(JSON.stringify(db.prepare('SELECT * FROM annotations ORDER BY response_id,user_id,batch_id').all().map(stable))),nonbehavior:nonbehavior(),history_digest:hash(JSON.stringify(db.prepare('SELECT * FROM history WHERE id<=? ORDER BY id').all(oldHistory.at(-1)?.id??0))),responses:hash(JSON.stringify(db.prepare('SELECT * FROM responses ORDER BY id').all())),annotations:db.prepare('SELECT count(*) n FROM annotations').get().n},selectable:BEHAVIOR_CODES.length};
+ const report={version:CODEBOOK_VERSION,added,retired,annotations_migrated:changed,review_assignments:flagged,mapping,before,after:{preserved_annotations:hash(JSON.stringify(db.prepare('SELECT * FROM annotations ORDER BY response_id,user_id,batch_id').all().map(stable))),nonbehavior:nonbehavior(),history_digest:hash(JSON.stringify(db.prepare('SELECT * FROM history WHERE id<=? ORDER BY id').all(oldHistory.at(-1)?.id??0))),responses:hash(JSON.stringify(db.prepare('SELECT * FROM responses ORDER BY id').all())),annotations:db.prepare('SELECT count(*) n FROM annotations').get().n},canonical:BEHAVIOR_CODES.length,selectable:BEHAVIOR_CODES.length};
  if(['responses','annotations','preserved_annotations','nonbehavior','history_digest'].some(k=>report.before[k]!==report.after[k]))throw new Error('Preservation check failed.');
  db.prepare('INSERT INTO behavior_migrations VALUES (?,?,?,?)').run(CODEBOOK_VERSION,timestamp(),backup,JSON.stringify(report));record(db,'codebook_migration',CODEBOOK_VERSION,author,1,report);
  return report;
@@ -100,7 +119,7 @@ export function migrateBehavior(db,author) {
 export function resolveBehaviorReview(db,author,input) {
  return transaction(db,()=>{
   const {response_id,user_id,batch_id,legacy_code_id,annotation_version,targets,reason}=input;
-  if(!Array.isArray(targets)||targets.length>19||targets.some(n=>!BEHAVIOR_CODES.some(c=>c.name===n))||typeof reason!=='string'||!reason.trim()||reason.length>6000)throw new Error('Choose valid labels and record the response evidence.');
+  if(!Array.isArray(targets)||targets.length>BEHAVIOR_CODES.length||targets.some(n=>!BEHAVIOR_CODES.some(c=>c.name===n))||typeof reason!=='string'||!reason.trim()||reason.length>6000)throw new Error('Choose valid labels and record the response evidence.');
   const row=db.prepare('SELECT * FROM annotations WHERE response_id=? AND user_id=? AND batch_id=?').get(response_id,user_id,batch_id);
   const review=db.prepare('SELECT * FROM behavior_reviews WHERE response_id=? AND user_id=? AND batch_id=? AND legacy_code_id=?').get(response_id,user_id,batch_id,legacy_code_id);
   if(!row||!review||review.resolved_at)throw new Error('Review is missing or already resolved.');
