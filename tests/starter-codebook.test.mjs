@@ -21,7 +21,7 @@ for(const version of ['drive-v4','render-v5'])test(`${version}: full vocabulary 
  const db=openDB(':memory:');try{
  const names=JSON.parse(readFileSync(new URL(`./fixtures/${version}.json`,import.meta.url),'utf8'));
  const {admin,ids}=fixture(db,names);const responses=db.prepare('SELECT * FROM responses').all(),old=db.prepare('SELECT * FROM annotations').all(),setting=db.prepare("SELECT * FROM codes WHERE dimension='setting'").get();
- const r=migrateBehavior(db,admin);assert.equal(r.selectable,19);assert.equal(r.mapping.length,names.length);
+ const r=migrateBehavior(db,admin);assert.equal(r.selectable,20);assert.equal(r.mapping.length,names.length);
  assert.deepEqual(db.prepare('SELECT * FROM responses').all(),responses);assert.deepEqual(db.prepare("SELECT * FROM codes WHERE dimension='setting'").get(),setting);
  const after=db.prepare('SELECT * FROM annotations').all();assert.equal(after.length,old.length);
  for(let i=0;i<after.length;i++){
@@ -29,7 +29,7 @@ for(const version of ['drive-v4','render-v5'])test(`${version}: full vocabulary 
   const before=JSON.parse(old[i].payload),next=JSON.parse(after[i].payload);assert.equal(new Set(next.dimensions.behavior.codes).size,next.dimensions.behavior.codes.length);before.dimensions.behavior.codes=[];next.dimensions.behavior.codes=[];assert.deepEqual(next,before);
  }
  for(const id of ids){const c=db.prepare('SELECT * FROM codes WHERE id=?').get(id);if(c.status==='retired'){assert.equal(c.definition,'Preserve old definition');assert.equal(c.family,'Legacy category');}}
- const labels=codebookReport(db).labels;assert.equal(labels.length,19);assert.deepEqual(labels.map(x=>({...x})),BEHAVIOR_CODES.map(({name,definition,include_rule,exclude_rule,example,family})=>({name,definition,include_rule,exclude_rule,example,family})).sort((a,b)=>a.name.localeCompare(b.name)));
+ const labels=codebookReport(db).labels;assert.equal(labels.length,20);assert.deepEqual(labels.map(x=>({...x})),BEHAVIOR_CODES.map(({name,definition,include_rule,exclude_rule,example,family})=>({name,definition,include_rule,exclude_rule,example,family})).sort((a,b)=>a.name.localeCompare(b.name)));
  seedStarterCodebook(db,admin);
  const h=db.prepare('SELECT * FROM history ORDER BY id').all();assert.ok(h.some(x=>x.entity==='annotation_codebook_migration'&&JSON.parse(x.payload).previous_payload));
  seedStarterCodebook(db,admin);seedStarterCodebook(db,admin);assert.deepEqual(db.prepare('SELECT * FROM history ORDER BY id').all(),h);assert.deepEqual(db.prepare('SELECT * FROM annotations').all(),after);
@@ -51,13 +51,24 @@ test('transaction rolls back all changes if a selected behavior is invalid',()=>
  const db=openDB(':memory:');try{const {admin}=fixture(db,['Asking for help']);db.prepare("UPDATE annotations SET payload=?").run(JSON.stringify({dimensions:{behavior:{codes:[99999]}}}));assert.throws(()=>migrateBehavior(db,admin),/Unknown selected behavior/);assert.equal(db.prepare("SELECT count(*) n FROM codes WHERE dimension='behavior'").get().n,1);assert.equal(db.prepare("SELECT count(*) n FROM history").get().n,0);}finally{db.close();}
 });
 
-test('v7 updates definitions without changing v6 annotations or researcher-added behaviors',()=>{
+test('v8 adds attention, renames intervention in place, and preserves v7 annotations and researcher-added behaviors',()=>{
  const db=openDB(':memory:');try{
   const admin=addUser(db,'v7-admin','V7 Admin','long-admin-password','admin'),now='before';
   const insert=db.prepare("INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated,family) VALUES ('behavior',?,?,?,?,?,'active',?,1,?,'')");
-  for(const spec of BEHAVIOR_CODES){
+  const previousNames=new Map([
+   ['Personal disclosure','Sharing something personal'],
+   ['Expressing opinions or disagreement','Expressing views'],
+   ['Performing or posting publicly (online or in person)','Speaking or performing publicly'],
+   ['Confronting or addressing interpersonal conflict','Addressing an interpersonal problem'],
+   ['Defending, supporting, or intervening for others','Intervening for others'],
+   ['Engaging in harmful social behavior (lying, gossiping, or manipulation)','Engaging in harmful social behavior'],
+   ['Making an education or career decision','Making an education or work decision']
+  ]),renamedIds=new Map();
+  for(const spec of BEHAVIOR_CODES.filter(spec=>spec.name!=='Drawing attention to oneself or being put on the spot')){
+   const name=previousNames.get(spec.name)||spec.name;
    const include=spec.name==='Other behavior'?'Use for an established action not covered above. Online communication or AI use without an established function can go here.':spec.include_rule;
-   insert.run(spec.name,spec.definition,include,spec.exclude_rule,spec.example,admin,now);
+   const id=Number(insert.run(name,spec.definition,include,spec.exclude_rule,spec.example,admin,now).lastInsertRowid);
+   if(name!==spec.name)renamedIds.set(spec.name,{id,previous:name});
   }
   const custom=Number(db.prepare("INSERT INTO codes(dimension,name,definition,include_rule,exclude_rule,example,status,author_id,version,updated,family) VALUES ('behavior','Researcher distinction','','','','','draft',?,1,?,'')").run(admin,now).lastInsertRowid);
   db.prepare('INSERT INTO responses VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run('v7-r','record','person','P001',1,'social_self_avoid','social','self','avoid','source','pool','wave',1,'A preserved response.',0);
@@ -67,6 +78,9 @@ test('v7 updates definitions without changing v6 annotations or researcher-added
   const before=db.prepare('SELECT * FROM annotations').get(),report=migrateBehavior(db,admin);
   assert.equal(report.targeted,true);assert.equal(report.from_version,PREVIOUS_CODEBOOK_VERSION);
   assert.deepEqual(db.prepare('SELECT * FROM annotations').get(),before);assert.equal(db.prepare('SELECT status FROM codes WHERE id=?').get(custom).status,'draft');
+  for(const [name,{id,previous}] of renamedIds){assert.equal(db.prepare('SELECT id FROM codes WHERE name=?').get(name).id,id);assert.equal(db.prepare('SELECT count(*) n FROM codes WHERE name=?').get(previous).n,0);}
+  assert.ok(db.prepare("SELECT id FROM codes WHERE name='Drawing attention to oneself or being put on the spot'").get());
+  assert.equal(report.canonical,20);assert.equal(report.selectable,21);
   assert.doesNotMatch(db.prepare("SELECT include_rule FROM codes WHERE name='Other behavior'").get().include_rule,/AI use without/);
   const history=db.prepare('SELECT * FROM history ORDER BY id').all();assert.equal(migrateBehavior(db,admin).already_applied,true);assert.deepEqual(db.prepare('SELECT * FROM history ORDER BY id').all(),history);
  }finally{db.close();}
@@ -86,7 +100,7 @@ test('review resolution is version-checked, supports distinct actions and preser
  const {resolveBehaviorReview}=await import('../behavior-migration.mjs');const db=openDB(':memory:');try{
  const {admin}=fixture(db,['Sharing opinions']);migrateBehavior(db,admin);
  const review=codebookReport(db).reviews.find(x=>x.batch_id===2&&x.user_id===admin),before=db.prepare('SELECT * FROM annotations WHERE batch_id=2 AND user_id=?').get(admin);
- const input={...review,targets:['Speaking or performing publicly','Asking for help or a favor'],reason:'Original response explicitly describes a classroom question and a separate request to a friend.'};
+ const input={...review,targets:['Performing or posting publicly (online or in person)','Asking for help or a favor'],reason:'Original response explicitly describes a classroom question and a separate request to a friend.'};
  assert.throws(()=>resolveBehaviorReview(db,admin,{...input,annotation_version:0}),/Reading changed/);
  resolveBehaviorReview(db,admin,input);const after=db.prepare('SELECT * FROM annotations WHERE batch_id=2 AND user_id=?').get(admin);
  assert.equal(after.status,before.status);assert.deepEqual(JSON.parse(after.payload).memos,JSON.parse(before.payload).memos);assert.equal(JSON.parse(after.payload).dimensions.behavior.codes.length,2);
