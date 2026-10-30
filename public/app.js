@@ -297,9 +297,10 @@ async function loadComparison() {
     $('#comparison-results').innerHTML = data.rows.map(item => {
       const resultLabel = {disagreement:'Behavior disagreement',consistent:'Behavior agreement',insufficient:'Not enough readings to compare'}[item.result];
       const renderField = (id, title, content, compared) => {
-        const scoredDifference=compared && id==='behavior' && item.fields[id]?.differs;
+        const scoredDifference=compared && id==='behavior' && item.fields[id]?.differs && item.result==='disagreement';
+        const acceptedBehaviorVariation=compared && id==='behavior' && item.fields[id]?.differs && item.result==='consistent';
         const unscoredVariation=compared && id!=='behavior' && item.fields[id]?.differs;
-        return `<div class="comparison-field ${scoredDifference ? 'differs' : ''}"><h3>${esc(title)}${scoredDifference ? ' · differs' : unscoredVariation ? ' · varies (not scored)' : ''}</h3>${content}</div>`;
+        return `<div class="comparison-field ${scoredDifference ? 'differs' : ''}"><h3>${esc(title)}${scoredDifference ? ' · disagrees' : acceptedBehaviorVariation ? ' · labels vary; agreement rule satisfied' : unscoredVariation ? ' · varies (not scored)' : ''}</h3>${content}</div>`;
       };
       return `<article class="comparison-card"><header><div><strong>${esc(item.response.participant_label)}</strong><p>${esc(prompt(item.response.prompt)?.label || item.response.prompt)}</p></div><span class="comparison-badge ${item.result}">${resultLabel}</span></header><blockquote>${esc(item.response.text) || '<em>No response entered.</em>'}</blockquote><p class="comparison-coverage">${item.eligibleCoderIds.length} compared · ${item.missing} without saved coding · ${item.unfinished} unfinished${item.noLabels ? ' · All compared readings have empty behavior sets; review before treating this as substantive agreement.' : ''}${item.observationsDiffer ? ' · Observations differ; read below.' : ''}${$('#comparison-scope').value === 'all' ? ' · Provisional comparison includes unfinished readings.' : ''}</p><div class="coder-columns">${item.readings.map(r => {
         const compared = item.eligibleCoderIds.includes(r.coder_id);
