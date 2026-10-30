@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compareReadings } from '../comparison.mjs';
-const reading=(id,codes=[],status='complete',quality='substantive',memo='')=>({coder_id:id,saved:true,status,response_quality:quality,observations:memo,dimensions:{behavior:codes.map(id=>({id})),anticipated_interpersonal_consequence:[],who:[],setting:[]}});
+const reading=(id,codes=[],status='complete',quality='substantive',memo='')=>({coder_id:id,saved:true,status,response_quality:quality,observations:memo,dimensions:{behavior:codes.map(code=>typeof code==='object'?code:{id:code}),anticipated_interpersonal_consequence:[],who:[],setting:[]}});
 test('order and duplicate labels do not create disagreement; observations are not scored',()=>{
  const r=compareReadings([reading(1,[2,1,1],'complete','substantive','One interpretation'),reading(2,[1,2],'complete','substantive','Another interpretation')]);
  assert.equal(r.result,'consistent');assert.equal(r.observationsDiffer,true);
@@ -26,4 +26,14 @@ test('nonbehavior label differences are visible but never affect agreement',()=>
 test('behavior agreement always uses completed overlapping readings',()=>{
  const result=compareReadings([reading(1,[1]),reading(2,[1]),reading(3,[2],'draft')],{includeDrafts:true});
  assert.equal(result.result,'disagreement');assert.equal(result.behaviorAgreement.result,'consistent');assert.deepEqual(result.behaviorAgreement.eligibleCoderIds,[1,2]);
+});
+test('partial overlap satisfies the team rule but every coder pair must be acceptable',()=>{
+ const subset=compareReadings([reading(1,[1]),reading(2,[1,2])]);
+ assert.equal(subset.result,'consistent');assert.equal(subset.fields.behavior.differs,true);
+ assert.equal(compareReadings([reading(1,[1]),reading(2,[1,2]),reading(3,[2])]).result,'disagreement');
+});
+test('empty versus Other behavior or an ambiguous response satisfies the team rule',()=>{
+ assert.equal(compareReadings([reading(1),reading(2,[{id:9,name:'Other behavior'}])]).result,'consistent');
+ assert.equal(compareReadings([reading(1),reading(2,[],'complete','ambiguous')]).result,'consistent');
+ assert.equal(compareReadings([reading(1),reading(2,[{id:9,name:'Another label'}])]).result,'disagreement');
 });
