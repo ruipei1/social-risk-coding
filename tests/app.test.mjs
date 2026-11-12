@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDB, importCSV, parseCSV, PROMPTS, addUser, csvExport } from '../model.mjs';
 import { createApp } from '../server.mjs';
+import { migrationPreview, activateWeeklyMigration, ensureReleasedWeeks, updateWeeklySettings } from '../weekly-workflow.mjs';
 
 const fixture = (key='test-record', text='I said "no",\nand stayed home.', participantKey='person-one') => ({ analysis_response_key:key, participant_key:participantKey, survey_source:'test source', pool:'psych', collection_wave_verified:'2026_Q1', response_complete:'1', ...Object.fromEntries(PROMPTS.map((p,i) => [p.id, i === 1 ? '' : text])) });
 function writeCSV(path, rows) {
@@ -233,5 +234,37 @@ test('Other behavior is last even when coders add alphabetically later labels', 
   const codes=(await s.request('/api/codes',a)).data.filter(c=>c.dimension==='behavior');
   assert.deepEqual(codes.map(c=>c.name),['Approaching others','Zebra behavior','Other behavior']);
   assert.ok(codes.every(c=>c.family===''));
+ }finally{s.close();}
+});
+
+test('weekly APIs restrict RAs to stable assignments and export current coding once per response', async()=>{
+ const s=setup();try{
+  const adminId=s.db.prepare("SELECT id FROM users WHERE username='admin'").get().id;
+  for(const [username,name] of [['joyce','Joyce'],['liqing','Liqing'],['mcamposgort','Melissa Campos']]) addUser(s.db,username,name,`${username}-weekly-password`);
+  const source=s.db.prepare('SELECT id FROM coding_batches WHERE active=1').get().id;
+  updateWeeklySettings(s.db,{default_quota:2});
+  const preview=migrationPreview(s.db,source),migration=activateWeeklyMigration(s.db,{sourceBatchId:source,previewKey:preview.preview_key,userId:adminId});
+  ensureReleasedWeeks(s.db,new Date('2026-11-22T17:00:00Z'));
+  const joyce=await s.login('joyce','joyce-weekly-password'),liqing=await s.login('liqing','liqing-weekly-password'),admin=await s.login('admin','administrator-test-password');
+  const joyceQueue=(await s.request(`/api/responses?batch=${migration.weekly_batch_id}`,joyce)).data;
+  const liqingQueue=(await s.request(`/api/responses?batch=${migration.weekly_batch_id}`,liqing)).data;
+  assert.equal(joyceQueue.total,2);assert.equal(liqingQueue.total,2);
+  assert.equal(new Set([...joyceQueue.responses,...liqingQueue.responses].map(row=>row.id)).size,4);
+  const foreign=liqingQueue.responses[0].id;
+  assert.equal((await s.request(`/api/response/${encodeURIComponent(foreign)}?batch=${migration.weekly_batch_id}`,joyce)).status,403);
+  const own=joyceQueue.responses[0].id,body=annotation('Weekly draft');body.batch_id=migration.weekly_batch_id;
+  assert.equal((await s.request(`/api/annotation/${encodeURIComponent(own)}`,{...joyce,method:'PUT',body})).status,200);
+  const resumed=(await s.request(`/api/response/${encodeURIComponent(own)}?batch=${migration.weekly_batch_id}`,joyce)).data;
+  assert.equal(resumed.annotation.status,'draft');assert.equal(resumed.annotation.version,1);
+  const pastWeek=Number(s.db.prepare("INSERT INTO coding_weeks(week_start,week_end,sequence,quota,status,released_at,created) VALUES ('2026-11-02','2026-11-08',0,2,'released','2026-11-02','2026-11-02')").run().lastInsertRowid);
+  const priorComplete=joyceQueue.responses[1].id;
+  s.db.prepare('UPDATE weekly_assignments SET week_id=? WHERE response_id=?').run(pastWeek,priorComplete);
+  s.db.prepare('INSERT INTO annotations(response_id,user_id,batch_id,status,payload,version,updated) VALUES (?,?,?,?,?,?,?)').run(priorComplete,s.db.prepare("SELECT id FROM users WHERE username='joyce'").get().id,migration.weekly_batch_id,'complete',JSON.stringify(annotation().payload),1,'2026-11-08T20:00:00Z');
+  const correction=annotation('Late correction');correction.batch_id=migration.weekly_batch_id;correction.version=1;correction.status='complete';
+  assert.equal((await s.request(`/api/annotation/${encodeURIComponent(priorComplete)}`,{...joyce,method:'PUT',body:correction})).status,409);
+  assert.equal((await s.request('/api/export?kind=current-coding',joyce)).status,403);
+  const exported=parseCSV((await s.request('/api/export?kind=current-coding',admin)).output);
+  assert.equal(exported.length,6);assert.equal(new Set(exported.map(row=>row.response_id)).size,6);
+  assert.equal(exported.find(row=>row.response_id===own).status,'draft');
  }finally{s.close();}
 });

@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { initializeWeeklySchema } from './weekly-workflow.mjs';
 
 export const DIMENSIONS = [
   ['behavior', 'Behavior', 'What action is completed, considered, attempted, or avoided? Select every substantively supported label. Multiple labels may represent distinct actions or distinct behavioral functions of one act. Approach/avoid is separate.'],
@@ -93,6 +94,7 @@ export function openDB(filename = process.env.DB_PATH || resolve('data', 'coding
     CREATE UNIQUE INDEX IF NOT EXISTS idx_coding_batches_one_active ON coding_batches(active) WHERE active=1;
   `);
   if (!db.prepare("PRAGMA table_info(codes)").all().some(c => c.name === "family")) db.exec("ALTER TABLE codes ADD COLUMN family TEXT NOT NULL DEFAULT ''");
+  initializeWeeklySchema(db);
   return db;
 }
 export function transaction(db, fn) {

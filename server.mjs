@@ -9,6 +9,10 @@ import { DIMENSIONS, ALL_DIM_IDS, PROMPTS, openDB, hash, timestamp, passwordMatc
 import { seedStarterCodebook } from './starter-codebook.mjs';
 import { CODEBOOK_VERSION, BEHAVIOR_CODES } from './behavior-vocabulary.mjs';
 import { codebookReport, resolveBehaviorReview } from './behavior-migration.mjs';
+import {
+  weeklySettings, migrationPreview, activateWeeklyMigration, weeklyDashboard, adminWeeklyOverview,
+  updateWeeklySettings, addWeeklyBreak, removeWeeklyBreak, reassignWeeklyResponse, localDateISO
+} from './weekly-workflow.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const failure = (status, message) => Object.assign(new Error(message), { status });
@@ -47,6 +51,29 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
     check(batch, 'Coding batch not found.', 404);
     if (writable) check(batch.active === 1, 'Past coding batches are read-only. Switch to the current batch to save changes.', 409);
     return batch;
+  }
+  function isWeeklyBatch(batch) {
+    return weeklySettings(db).weekly_batch_id === batch.id;
+  }
+  function weeklyAssignment(responseId, userId) {
+    return db.prepare(`SELECT wa.*,w.week_start,w.week_end,w.sequence FROM weekly_assignments wa
+      JOIN coding_weeks w ON w.id=wa.week_id WHERE wa.response_id=? AND wa.user_id=?`).get(responseId, userId);
+  }
+  function checkWeeklyAccess(batch, responseId, user, { writable = false } = {}) {
+    if (!isWeeklyBatch(batch)) return null;
+    if (user.role === 'admin') {
+      check(!writable, 'Administrators review weekly coding from the project dashboard.', 403);
+      return db.prepare(`SELECT wa.*,w.week_start,w.week_end,w.sequence,u.name assigned_name,u.username assigned_username
+        FROM weekly_assignments wa JOIN coding_weeks w ON w.id=wa.week_id JOIN users u ON u.id=wa.user_id
+        WHERE wa.response_id=?`).get(responseId);
+    }
+    const assignment = weeklyAssignment(responseId, user.id);
+    check(assignment, 'This response is not assigned to you.', 403);
+    if (writable && assignment.week_end < localDateISO(new Date(), weeklySettings(db).timezone)) {
+      const saved = db.prepare('SELECT status FROM annotations WHERE response_id=? AND user_id=? AND batch_id=?').get(responseId, user.id, batch.id);
+      check(saved?.status !== 'complete', 'Completed responses from earlier weeks are read only. Ask an administrator to record a correction.', 409);
+    }
+    return assignment;
   }
   function reviewsFor(responseId,userId,batchId) {
     if (!db.prepare("SELECT name FROM sqlite_master WHERE name='behavior_reviews'").get()) return [];
@@ -137,6 +164,39 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
           res.setHeader('Set-Cookie', 'coding_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
           return json({ ok: true, codebook_version: CODEBOOK_VERSION, commit: process.env.RENDER_GIT_COMMIT || null });
         }
+        if (req.method === 'GET' && path === '/api/weekly/dashboard') return json(weeklyDashboard(db, user.id));
+        if (req.method === 'GET' && path === '/api/weekly/admin') { admin(); return json(adminWeeklyOverview(db)); }
+        if (req.method === 'GET' && path === '/api/weekly/migration-preview') {
+          admin();
+          const selected = url.searchParams.get('source_batch');
+          try { return json(migrationPreview(db, selected ? Number(selected) : null)); }
+          catch (error) { throw failure(400, error.message); }
+        }
+        if (req.method === 'POST' && path === '/api/weekly/migrate') {
+          admin(); const input = await body(req);
+          try { return json(activateWeeklyMigration(db, { sourceBatchId:Number(input.source_batch_id), previewKey:str(input.preview_key, 100), userId:user.id })); }
+          catch (error) { throw failure(409, error.message); }
+        }
+        if (req.method === 'PUT' && path === '/api/weekly/settings') {
+          admin(); const input = await body(req);
+          try { return json(updateWeeklySettings(db, input)); }
+          catch (error) { throw failure(400, error.message); }
+        }
+        if (req.method === 'POST' && path === '/api/weekly/breaks') {
+          admin(); const input = await body(req);
+          try { return json(addWeeklyBreak(db, { ...input, userId:user.id })); }
+          catch (error) { throw failure(400, error.message); }
+        }
+        if (req.method === 'DELETE' && /^\/api\/weekly\/breaks\/\d+$/.test(path)) {
+          admin();
+          try { removeWeeklyBreak(db, Number(path.split('/').pop())); return json({ ok:true }); }
+          catch (error) { throw failure(409, error.message); }
+        }
+        if (req.method === 'POST' && path === '/api/weekly/reassign') {
+          admin(); const input = await body(req);
+          try { reassignWeeklyResponse(db, { responseId:str(input.response_id, 200), targetUserId:Number(input.target_user_id), adminId:user.id }); return json({ ok:true }); }
+          catch (error) { throw failure(409, error.message); }
+        }
         if (req.method === 'GET' && path === '/api/batches') {
           const batches = db.prepare(`
             SELECT b.*,u.name created_by_name,count(a.response_id) saved_annotations
@@ -171,11 +231,38 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
         if (req.method === 'GET' && path === '/api/stats') {
           const batch = batchById(url.searchParams.get('batch'));
           const counts = db.prepare('SELECT count(*) total, sum(blank=0) nonblank, count(DISTINCT record_key) records FROM responses').get();
+          if (isWeeklyBatch(batch)) {
+            const filter = user.role === 'admin' ? '' : ' WHERE wa.user_id=?', filterArgs = user.role === 'admin' ? [] : [user.id];
+            const total = db.prepare(`SELECT count(*) n FROM weekly_assignments wa${filter}`).get(...filterArgs).n;
+            const mine = db.prepare(`SELECT COALESCE(a.status,'unread') status,count(*) n FROM weekly_assignments wa
+              LEFT JOIN annotations a ON a.response_id=wa.response_id AND a.user_id=wa.user_id AND a.batch_id=?
+              ${filter} GROUP BY COALESCE(a.status,'unread')`).all(batch.id, ...filterArgs);
+            return json({ ...counts, total, batch, mine, byPrompt:[] });
+          }
           const mine = db.prepare('SELECT status, count(*) n FROM annotations WHERE user_id=? AND batch_id=? GROUP BY status').all(user.id, batch.id);
           return json({ ...counts, batch, mine, byPrompt: db.prepare("SELECT r.prompt, count(*) total, sum(r.blank=0) nonblank, sum(COALESCE(a.status,'unread')='complete') complete FROM responses r LEFT JOIN annotations a ON a.response_id=r.id AND a.user_id=? AND a.batch_id=? GROUP BY r.prompt").all(user.id, batch.id) });
         }
         if (req.method === 'GET' && path === '/api/responses') {
           const batch = batchById(url.searchParams.get('batch'));
+          if (isWeeklyBatch(batch)) {
+            const where = [], args = [batch.id];
+            if (user.role !== 'admin') { where.push('wa.user_id=?'); args.push(user.id); }
+            const weekId = Number(url.searchParams.get('week_id'));
+            if (Number.isSafeInteger(weekId) && weekId > 0) { where.push('wa.week_id=?'); args.push(weekId); }
+            for (const key of ['domain','perspective','direction','pool']) if (url.searchParams.get(key)) { where.push(`r.${key}=?`); args.push(url.searchParams.get(key)); }
+            const search = url.searchParams.get('q')?.slice(0, 200);
+            if (search) { where.push("(r.text LIKE ? ESCAPE '\\' OR r.participant_label LIKE ? ESCAPE '\\')"); const term='%' + search.replace(/[\\%_]/g,'\\$&') + '%'; args.push(term,term); }
+            const status = url.searchParams.get('status'); if (status) { where.push("COALESCE(a.status,'unread')=?"); args.push(status); }
+            if (url.searchParams.get('unfinished') === '1') where.push("COALESCE(a.status,'unread')!='complete'");
+            const from = `FROM weekly_assignments wa JOIN coding_weeks w ON w.id=wa.week_id JOIN responses r ON r.id=wa.response_id
+              LEFT JOIN annotations a ON a.response_id=r.id AND a.user_id=wa.user_id AND a.batch_id=? ${where.length ? 'WHERE '+where.join(' AND ') : ''}`;
+            const total = db.prepare('SELECT count(*) n '+from).get(...args).n;
+            const offset = Math.max(0, Math.min(100000, parseInt(url.searchParams.get('offset') || '0') || 0));
+            const list = db.prepare(`SELECT r.id,r.participant_label,r.record_number,r.prompt,r.text,r.blank,
+              COALESCE(a.status,'unread') status,w.id week_id,w.week_start,w.week_end,w.sequence,wa.user_id assigned_user_id
+              ${from} ORDER BY w.week_start,r.record_number,r.rowid LIMIT 40 OFFSET ?`).all(...args, offset);
+            return json({ total, offset, batch, responses:list });
+          }
           const where = [], args = [user.id, batch.id];
           for (const key of ['domain', 'perspective', 'direction', 'pool']) if (url.searchParams.get(key)) { where.push(`r.${key}=?`); args.push(url.searchParams.get(key)); }
           const search = url.searchParams.get('q')?.slice(0, 200);
@@ -193,13 +280,16 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
           const batch = batchById(url.searchParams.get('batch'));
           const id = decodeURIComponent(path.slice('/api/response/'.length));
           const response = db.prepare('SELECT * FROM responses WHERE id=?').get(id); check(response, 'Response not found.', 404);
+          const assignment = checkWeeklyAccess(batch, id, user);
           const related = db.prepare('SELECT id,prompt,text,blank FROM responses WHERE record_key=? ORDER BY rowid').all(response.record_key);
-          return json({ response, annotation: annotation(id, user.id, batch.id), batch, related });
+          const annotationUserId = assignment?.user_id || user.id;
+          return json({ response, annotation: annotation(id, annotationUserId, batch.id), batch, related, assignment, writable:user.role !== 'admin' && batch.active === 1 });
         }
         if (req.method === 'PUT' && path.startsWith('/api/annotation/')) {
           const id = decodeURIComponent(path.slice('/api/annotation/'.length)), input = await body(req);
           const batch = batchById(input.batch_id, { writable:true });
           const response = db.prepare('SELECT * FROM responses WHERE id=?').get(id); check(response, 'Response not found.', 404);
+          checkWeeklyAccess(batch, id, user, { writable:true });
           const version = number(input.version), payload = validatePayload(input.payload, annotation(id, user.id, batch.id).payload);
           check(['draft', 'complete', 'flagged'].includes(input.status), 'Invalid annotation status.');
           // Every quoted passage must be present in the original response.
@@ -314,6 +404,27 @@ export function createApp({ db = openDB(), preview = false, origin = process.env
         }
         if (req.method === 'GET' && path === '/api/export') {
           const kind = url.searchParams.get('kind') || 'annotations';
+          if (kind === 'weekly-assignments' || kind === 'current-coding') {
+            admin(); const settings = weeklySettings(db);
+            const rows = db.prepare(`SELECT r.id response_id,r.participant_label,r.prompt,u.username assigned_ra,
+              w.sequence coding_week,w.week_start,w.week_end,COALESCE(a.status,'unread') status,a.payload current_coding,
+              COALESCE(a.version,0) coding_version,a.updated
+              FROM weekly_assignments wa JOIN responses r ON r.id=wa.response_id JOIN users u ON u.id=wa.user_id
+              JOIN coding_weeks w ON w.id=wa.week_id LEFT JOIN annotations a
+              ON a.response_id=wa.response_id AND a.user_id=wa.user_id AND a.batch_id=?
+              ORDER BY w.week_start,u.username,r.record_number,r.rowid`).all(settings.weekly_batch_id || -1);
+            const fields=['response_id','participant_label','prompt','assigned_ra','coding_week','week_start','week_end','status','current_coding','coding_version','updated'];
+            res.writeHead(200, { 'Content-Type':'text/csv; charset=utf-8', 'Content-Disposition':'attachment; filename="current-weekly-coding.csv"' });
+            return res.end(csvExport(rows, fields));
+          }
+          if (kind === 'historical-coding') {
+            admin(); const settings=weeklySettings(db);
+            const rows=db.prepare(`SELECT a.response_id,u.username coder,b.name coding_batch,a.status,a.payload,a.version,a.updated
+              FROM annotations a JOIN users u ON u.id=a.user_id JOIN coding_batches b ON b.id=a.batch_id
+              WHERE a.batch_id!=? ORDER BY b.id,a.response_id,u.id`).all(settings.weekly_batch_id || -1);
+            res.writeHead(200, { 'Content-Type':'text/csv; charset=utf-8', 'Content-Disposition':'attachment; filename="historical-coding.csv"' });
+            return res.end(csvExport(rows,['response_id','coder','coding_batch','status','payload','version','updated']));
+          }
           if (kind === 'codes') {
             const rows = db.prepare('SELECT c.*,u.username author FROM codes c JOIN users u ON u.id=c.author_id').all();
             res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="codebook.csv"' });

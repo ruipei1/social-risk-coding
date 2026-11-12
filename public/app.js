@@ -3,7 +3,7 @@ import { addSelectedCode } from './selections.js';
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
-const state = { user: null, csrf: '', dimensions: [], prompts: [], codes: [], batches: [], participants: [], batchId: null, queue: [], total: 0, offset: 0, detail: null, dirty: false, revision: 0, saving: null, saveTimer: null, blocked: false, view: 'reading' };
+const state = { user: null, csrf: '', dimensions: [], prompts: [], codes: [], batches: [], participants: [], batchId: null, queue: [], total: 0, offset: 0, detail: null, dirty: false, revision: 0, saving: null, saveTimer: null, blocked: false, view: 'dashboard', weekly: null, selectedWeekId: null, unfinishedOnly: false };
 const labels = { unread:'Unread', draft:'In progress', complete:'Complete', flagged:'For discussion', explicit:'Explicit', inferred:'Inferred', not_stated:'Not stated', unclear:'Unclear', mixed:'Mixed', unreviewed:'Not reviewed' };
 let queueRequest = 0;
 let responseRequest = 0;
@@ -24,10 +24,10 @@ async function bootstrap() {
   $('#login').hidden = !!data.user; $('#app').hidden = !data.user;
   $('#preview-login').hidden = !data.preview; $('#login-form').hidden = data.preview;
   if (!data.user) return;
-  $('#user-name').textContent = data.user.name; $('#team-nav').hidden = data.user.role !== 'admin'; $('#comparison-nav').hidden = data.user.role !== 'admin'; $('#new-batch').hidden = data.user.role !== 'admin';
+  $('#user-name').textContent = data.user.name; $('#team-nav').hidden = data.user.role !== 'admin'; $('#comparison-nav').hidden = data.user.role !== 'admin'; $('#weekly-admin-nav').hidden = data.user.role !== 'admin'; $('#new-batch').hidden = true;
   $('#mode-label').textContent = data.preview ? 'Local preview · saved on this computer' : 'Private research workspace';
   $('#codebook-dimension').innerHTML = '<option value="">Every dimension</option>' + state.dimensions.map(d => `<option value="${d.id}">${esc(d.label)}</option>`).join('');
-  await loadCodes(); await loadBatches(); await loadStats(); await loadQueue();
+  await loadCodes(); await loadBatches(); await loadDashboard(); await changeView(data.user.role === 'admin' ? 'weekly-admin' : 'dashboard');
 }
 async function loadBatches(preferBatchId = null) {
   const data = await api('/api/batches');
@@ -40,7 +40,7 @@ async function loadBatches(preferBatchId = null) {
   updateBatchMode();
 }
 function updateBatchMode() {
-  const batch = selectedBatch(), readonly = batch && !batch.active;
+  const batch = selectedBatch(), readonly = batch && (!batch.active || state.detail?.writable === false);
   $('#batch-note').textContent = batch ? `${readonly ? 'Past batch · read only' : 'Current batch'}${batch.start_participant ? ` · starts at ${batch.start_participant}` : ''}` : '';
   $('#coding-fields').classList.toggle('readonly-batch', !!readonly);
   $$('#coding-fields select, #coding-fields button, #observations').forEach(control => control.disabled = !!readonly);
@@ -57,6 +57,8 @@ async function loadStats() {
 }
 function query() {
   const params = new URLSearchParams({ offset:state.offset, batch:state.batchId });
+  if (state.selectedWeekId) params.set('week_id', state.selectedWeekId);
+  if (state.unfinishedOnly) params.set('unfinished', '1');
   for (const name of ['domain','perspective','direction','status']) if ($('#filter-' + name).value) params.set(name, $('#filter-' + name).value);
   if ($('#search').value.trim()) params.set('q', $('#search').value.trim());
   if ($('#include-blanks').checked) params.set('blanks', '1');
@@ -112,6 +114,8 @@ function renderResponse() {
   updateCategoryGuides();
   if(a.migration_reviews?.length) $('#coding-fields').insertAdjacentHTML('afterbegin', `<aside class="migration-warning"><strong>Vocabulary migration review</strong><p>Your reading status has not changed. Legacy selections are preserved pending review.</p><ul>${a.migration_reviews.map(x=>`<li>${esc(x.legacy_name)}: ${esc(x.reason)}</li>`).join('')}</ul></aside>`);
   statusPill(a.status); setSave(a.updated ? 'Saved ' + new Date(a.updated).toLocaleString() : 'Your notes save automatically as you write');
+  const position = state.queue.findIndex(item => item.id === r.id) + state.offset + 1;
+  $('#response-position').textContent = state.total ? `${position > 0 ? `Response ${position} of ${state.total}` : 'Assigned response'}${state.detail.assignment?.sequence ? ` · Week ${state.detail.assignment.sequence}` : ''}` : '';
   $('#source-panel').scrollTop = 0; $('#coding-fields').scrollTop = 0;
 }
 function renderChips(ids) { return ids.map(id => { const code = state.codes.find(c => c.id === id); return `<span class="chip" data-code-id="${id}">${esc(code?.name || 'Code ' + id)}${code?.status==='retired'?' · legacy / review':''}<button data-remove-code="${id}" aria-label="Remove ${esc(code?.name)}">×</button></span>`; }).join(''); }
@@ -193,13 +197,55 @@ function openCode(dimension, id = null) {
 }
 async function changeView(view) {
   await flush(); state.view = view;
-  for (const v of ['reading','codebook','team','comparison']) $('#' + v + '-view').hidden = v !== view;
+  for (const v of ['dashboard','reading','codebook','team','comparison','weekly-admin']) $('#' + v + '-view').hidden = v !== view;
   $$('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
-  if (view === 'codebook') await loadCodes(); if (view === 'team') await loadTeam(); if (view === 'comparison') await loadComparison();
+  if (view === 'dashboard') await loadDashboard();
+  if (view === 'reading' && !state.queue.length) { await loadStats(); await loadQueue(); }
+  if (view === 'codebook') await loadCodes(); if (view === 'team') await loadTeam(); if (view === 'comparison') await loadComparison(); if (view === 'weekly-admin') await loadWeeklyAdmin();
 }
 async function loadTeam() {
   const users = await api('/api/team?batch=' + state.batchId);
   $('#team-table').innerHTML = `<div class="table-wrap"><table><thead><tr><th>Researcher</th><th>Role</th><th>Started</th><th>Complete</th><th>For discussion</th></tr></thead><tbody>${users.map(u => `<tr><td><strong>${esc(u.name)}</strong><br><span class="muted">${esc(u.username)}${u.active ? '' : ' · disabled'}</span></td><td>${u.role === 'admin' ? 'Administrator' : 'Research assistant'}</td><td>${u.started}</td><td>${u.complete || 0}</td><td>${u.flagged || 0}</td></tr>`).join('')}</tbody></table></div>`;
+}
+const humanDate = value => new Intl.DateTimeFormat('en-US', { month:'short', day:'numeric', year:'numeric', timeZone:'UTC' }).format(new Date(value + 'T12:00:00Z'));
+function weekLabel(week) { return week?.sequence ? `Week ${week.sequence} · ${humanDate(week.week_start)}–${humanDate(week.week_end)}` : `${humanDate(week.week_start)}–${humanDate(week.week_end)}`; }
+async function loadDashboard() {
+  const data = await api('/api/weekly/dashboard'); state.weekly = data;
+  const overallAssigned = Number(data.overall.assigned || 0), overallComplete = Number(data.overall.complete || 0);
+  const current = data.current_week ? data.weeks.find(week => week.id === data.current_week.id) : null;
+  const currentComplete = Number(current?.complete || 0), currentAssigned = Number(current?.assigned || 0);
+  const currentRemaining = Math.max(0, currentAssigned - currentComplete);
+  const paused = data.settings.paused || data.current_break;
+  const previous = data.weeks.filter(week => week.status === 'released' && week.id !== current?.id);
+  $('#coding-dashboard').innerHTML = `<section class="dashboard-hero"><p class="eyebrow">MY CODING</p><div class="dashboard-hero-grid"><div><h1>${current ? esc(weekLabel(current)) : paused ? 'Coding break' : 'Weekly coding'}</h1><p class="dashboard-progress">${current ? `${currentComplete} / ${currentAssigned} completed` : 'No new assignment this week'}</p><p class="muted">${current ? `${currentRemaining} responses remaining this week` : data.current_break ? esc(data.current_break.label) : data.settings.paused ? 'New assignments are paused by the administrator.' : 'Your first weekly assignment has not been released yet.'}</p></div><div class="overall-progress"><span>Overall progress</span><strong>${overallComplete} / ${overallAssigned}</strong><progress value="${overallAssigned ? overallComplete / overallAssigned * 100 : 0}" max="100"></progress></div></div>${data.carryover ? `<p class="carryover-note"><strong>${data.carryover} carried over</strong> from previous weeks. They remain available until completed.</p>` : ''}<button class="primary dashboard-continue" data-continue-response="${esc(data.next_response_id || '')}" data-continue-week="${data.next_week_id || ''}" ${data.next_response_id ? '' : 'disabled'}>Continue Coding</button></section>
+  <div class="dashboard-columns"><section class="dashboard-card"><p class="eyebrow">THIS WEEK</p><h2>${current ? esc(weekLabel(current)) : 'No new release'}</h2>${current ? `<p><strong>${currentComplete}</strong> completed · <strong>${currentRemaining}</strong> remaining</p><button class="secondary" data-open-week="${current.id}">Open this week</button>` : `<p class="muted">You can still finish earlier assignments during a break.</p>`}</section><section class="dashboard-card"><p class="eyebrow">PREVIOUS WEEKS</p><div class="week-list">${previous.map(week => { const remaining=Math.max(0,Number(week.assigned)-Number(week.complete||0)); return `<article><div><strong>${esc(weekLabel(week))}</strong><span>${week.complete||0} / ${week.assigned||0} completed${remaining ? ` · ${remaining} unfinished` : ' · complete'}</span></div><button class="quiet" data-open-week="${week.id}" data-unfinished="${remaining ? '1' : ''}">${remaining ? 'Continue' : 'Review'}</button></article>`; }).join('') || '<p class="muted">No previous weekly assignments yet.</p>'}</div></section></div>`;
+}
+async function openWeeklyWork({ weekId = null, responseId = null, unfinished = false } = {}) {
+  if (!state.weekly?.settings.weekly_batch_id) return notice('Weekly coding has not been activated yet.');
+  state.batchId = state.weekly.settings.weekly_batch_id; state.selectedWeekId = weekId ? Number(weekId) : null; state.unfinishedOnly = unfinished; state.offset = 0; state.detail = null; state.queue = [];
+  $('#coding-batch').value = String(state.batchId);
+  await loadStats(); await loadQueue(!responseId); await changeView('reading');
+  if (responseId) {
+    const inQueue = state.queue.some(item => item.id === responseId);
+    if (inQueue) await openResponse(responseId);
+    else { state.selectedWeekId = null; state.offset = 0; await loadQueue(false); await openResponse(responseId); }
+  }
+}
+async function loadWeeklyAdmin() {
+  const data = await api('/api/weekly/admin');
+  const content = $('#weekly-admin-content');
+  const migration = data.settings.migrated_at ? '' : `<section class="admin-card migration-setup"><h2>Prepare weekly migration</h2><p>No coding data will change until you review the source-batch counts and confirm.</p><div id="weekly-migration-preview"><button id="load-weekly-preview" class="secondary">Review migration plan</button></div></section>`;
+  content.innerHTML = `<div class="overview-metrics"><article><span>Total responses</span><strong>${data.total_responses.toLocaleString()}</strong></article><article><span>Current-rule complete</span><strong>${data.completed_responses.toLocaleString()}</strong></article><article><span>Remaining</span><strong>${data.remaining_responses.toLocaleString()}</strong></article><article><span>Estimated active weeks</span><strong>${data.estimated_active_weeks}</strong></article></div>${migration}
+  <div class="admin-grid"><section class="admin-card"><h2>RA progress</h2><div class="table-wrap"><table><thead><tr><th>Researcher</th><th>Assigned</th><th>Complete</th><th>Remaining</th></tr></thead><tbody>${data.ra_progress.map(ra=>`<tr><td>${esc(ra.name)}</td><td>${ra.assigned}</td><td>${ra.complete}</td><td>${Number(ra.assigned)-Number(ra.complete)}</td></tr>`).join('')}</tbody></table></div></section>
+  <section class="admin-card"><h2>Weekly settings</h2><form id="weekly-settings-form"><label>Schedule starts<input name="start_date" type="date" value="${data.settings.start_date}" required></label><label>Future weekly quota<input name="default_quota" type="number" min="1" max="1000" value="${data.settings.default_quota}" required></label><label class="check-label"><input name="paused" type="checkbox" ${data.settings.paused ? 'checked' : ''}> Pause new weekly releases</label><p class="muted small">Existing assignments and unfinished work are never changed.</p><button class="primary" type="submit">Save settings</button></form></section>
+  <section class="admin-card"><h2>Academic breaks</h2><div class="break-list">${data.breaks.map(item=>`<div><span><strong>${esc(item.label)}</strong><small>${humanDate(item.start_date)}–${humanDate(item.end_date)}</small></span><button class="quiet" data-remove-break="${item.id}">Remove</button></div>`).join('')}</div><form id="weekly-break-form" class="break-form"><label>Label<input name="label" required></label><label>Start<input name="start_date" type="date" required></label><label>End<input name="end_date" type="date" required></label><button class="secondary" type="submit">Add break</button></form></section>
+  <section class="admin-card"><h2>Review and reassign</h2><button id="weekly-review-flagged" class="secondary" ${data.settings.weekly_batch_id ? '' : 'disabled'}>Review flagged responses</button><form id="weekly-reassign-form"><label>Response ID<input name="response_id" required placeholder="Stable response ID"></label><label>Assign to<select name="target_user_id">${data.ra_progress.map(ra=>`<option value="${ra.id}">${esc(ra.name)}</option>`).join('')}</select></label><p class="muted small">Only unstarted responses can be reassigned.</p><button class="secondary" type="submit" ${data.settings.weekly_batch_id ? '' : 'disabled'}>Reassign response</button></form></section>
+  <section class="admin-card"><h2>Exports and audit</h2><p><a href="/api/export?kind=current-coding">Current coding CSV</a></p><p><a href="/api/export?kind=historical-coding">Historical coding CSV</a></p><p><a href="/api/export?kind=history">Complete revision history</a></p></section></div>`;
+}
+async function loadMigrationPreview(sourceBatch = '') {
+  const preview = await api('/api/weekly/migration-preview' + (sourceBatch ? `?source_batch=${sourceBatch}` : ''));
+  const target = $('#weekly-migration-preview');
+  target.innerHTML = `${preview.ambiguous ? `<p class="migration-alert"><strong>Confirmation required:</strong> ${esc(preview.ambiguity_reason)}</p>` : ''}<label>Preserve completed coding from<select id="weekly-source-batch">${preview.batches.map(batch=>`<option value="${batch.id}" ${batch.id===preview.selected_batch_id?'selected':''}>${esc(batch.name)} · ${batch.completed_responses} complete</option>`).join('')}</select></label><div class="migration-counts"><span>Total <strong>${preview.total_responses}</strong></span><span>Exempt <strong>${preview.exempt_latest_completed}</strong></span><span>Older to recode <strong>${preview.older_coded_requiring_recode}</strong></span><span>Never coded <strong>${preview.never_coded_responses}</strong></span><span>Remaining <strong>${preview.total_remaining}</strong></span></div><p>${preview.estimated_active_weeks} estimated active weeks at ${preview.weekly_quota} responses per RA.</p><button id="activate-weekly-migration" class="primary" data-preview-key="${preview.preview_key}" data-source-batch="${preview.selected_batch_id}">Back up data and activate weekly coding</button>`;
 }
 document.addEventListener('input', e => { if (e.target.matches('[data-memo]')) edited(); });
 document.addEventListener('change', e => {
@@ -225,6 +271,12 @@ document.addEventListener('click', e => {
   else if (b.dataset.propose) openCode(b.dataset.propose);
   else if (b.dataset.editCode) openCode(null, Number(b.dataset.editCode));
   else if (b.dataset.editComparison) openComparisonEditor(b.dataset.responseId, Number(b.dataset.coderId));
+  else if (b.dataset.continueResponse) attempt(() => openWeeklyWork({ weekId:b.dataset.continueWeek, responseId:b.dataset.continueResponse, unfinished:true }));
+  else if (b.dataset.openWeek) attempt(() => openWeeklyWork({ weekId:b.dataset.openWeek, unfinished:b.dataset.unfinished === '1' }));
+  else if (b.dataset.removeBreak) attempt(async () => { await api('/api/weekly/breaks/' + b.dataset.removeBreak, { method:'DELETE', body:'{}' }); await loadWeeklyAdmin(); });
+  else if (b.id === 'load-weekly-preview') attempt(() => loadMigrationPreview());
+  else if (b.id === 'weekly-review-flagged') attempt(async () => { state.batchId=state.weekly?.settings.weekly_batch_id || (await api('/api/weekly/admin')).settings.weekly_batch_id; state.selectedWeekId=null; state.unfinishedOnly=false; state.offset=0; state.queue=[]; $('#filter-status').value='flagged'; await loadStats(); await loadQueue(); await changeView('reading'); });
+  else if (b.id === 'activate-weekly-migration') attempt(async () => { b.disabled=true; await api('/api/weekly/migrate',{method:'POST',body:JSON.stringify({source_batch_id:Number(b.dataset.sourceBatch),preview_key:b.dataset.previewKey})}); await loadBatches(); await loadWeeklyAdmin(); notice('Weekly coding activated. A database backup was created before migration.'); });
   else if (b.dataset.removeCode) { const dimension = b.closest('[data-chips]').dataset.chips; b.closest('.chip').remove(); $(`[data-dimension="${dimension}"] .dim-indicator`).textContent = selectedCodes(dimension).length ? selectedCodes(dimension).length + ' selected' : ''; $(`[data-pick-code="${dimension}"]`).innerHTML = codeOptions(dimension, selectedCodes(dimension)); edited(); }
   else if (b.id === 'reading-help') $('#help-dialog').showModal();
   else if (b.id === 'next-response') attempt(() => nextResponse(1));
@@ -233,6 +285,8 @@ document.addEventListener('click', e => {
 $('#login-form').addEventListener('submit', async e => { e.preventDefault(); try { const f = new FormData(e.target); await api('/api/login', { method:'POST', body:JSON.stringify(Object.fromEntries(f)) }); e.target.reset(); await bootstrap(); } catch (error) { $('#login-error').textContent = error.message; } });
 $('#preview-login').onclick = () => attempt(async () => { await api('/api/preview-login', { method:'POST', body:'{}' }); await bootstrap(); });
 $('#logout').onclick = () => attempt(async () => { await flush(); await api('/api/logout', { method:'POST', body:'{}' }); location.reload(); });
+$('#back-dashboard').onclick = () => attempt(() => changeView('dashboard'));
+$('#weekly-admin-refresh').onclick = () => attempt(() => loadWeeklyAdmin());
 $('#save-draft').onclick = () => attempt(() => flush('draft'));
 $('#flag-response').onclick = () => attempt(() => flush('flagged'));
 $('#complete-next').onclick = () => attempt(async () => { await flush('complete'); await nextResponse(); });
@@ -273,8 +327,17 @@ $('#batch-form').onsubmit = async e => {
     notice(`Started “${created.name}”. Earlier annotations are preserved in the previous batch.`);
   } catch (error) { $('.form-error', form).textContent = error.message; } finally { button.disabled = false; }
 };
+document.addEventListener('submit', e => {
+  if (e.target.id === 'weekly-settings-form') { e.preventDefault(); attempt(async () => { const form=e.target; await api('/api/weekly/settings',{method:'PUT',body:JSON.stringify({start_date:form.elements.start_date.value,default_quota:Number(form.elements.default_quota.value),paused:form.elements.paused.checked})}); await loadWeeklyAdmin(); notice('Future weekly settings saved. Existing assignments were not changed.'); }); }
+  if (e.target.id === 'weekly-break-form') { e.preventDefault(); attempt(async () => { await api('/api/weekly/breaks',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))}); await loadWeeklyAdmin(); notice('Academic break added.'); }); }
+  if (e.target.id === 'weekly-reassign-form') { e.preventDefault(); attempt(async () => { const form=e.target; await api('/api/weekly/reassign',{method:'POST',body:JSON.stringify({response_id:form.elements.response_id.value,target_user_id:Number(form.elements.target_user_id.value)})}); form.reset(); await loadWeeklyAdmin(); notice('Unstarted response reassigned.'); }); }
+});
+document.addEventListener('change', e => { if (e.target.id === 'weekly-source-batch') attempt(() => loadMigrationPreview(e.target.value)); });
 window.addEventListener('beforeunload', e => { if (state.dirty || state.saving) { e.preventDefault(); e.returnValue = ''; } });
-document.addEventListener('keydown', e => { if (e.altKey && ['ArrowLeft','ArrowRight'].includes(e.key) && state.view === 'reading' && !$$('dialog[open]').length) { e.preventDefault(); attempt(() => nextResponse(e.key === 'ArrowRight' ? 1 : -1)); } });
+document.addEventListener('keydown', e => {
+  if (e.altKey && ['ArrowLeft','ArrowRight'].includes(e.key) && state.view === 'reading' && !$$('dialog[open]').length) { e.preventDefault(); attempt(() => nextResponse(e.key === 'ArrowRight' ? 1 : -1)); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && state.view === 'reading' && !$$('dialog[open]').length) { e.preventDefault(); attempt(async () => { await flush('complete'); await nextResponse(); }); }
+});
 bootstrap().catch(e => { $('#login').hidden = false; $('#login-error').textContent = e.message; });
 
 let comparisonOffset = 0, comparisonRequest = 0, comparisonRows = [], comparisonCoderIds = null;
