@@ -9,7 +9,8 @@ let queueRequest = 0;
 let responseRequest = 0;
 function notice(message = '') { $('#notice').textContent = message; $('#notice').hidden = !message; }
 async function api(path, options = {}) {
-  const response = await fetch(path, { ...options, headers: { ...(options.body ? { 'Content-Type':'application/json', 'X-CSRF-Token':state.csrf } : {}), ...options.headers } });
+  const target = path.startsWith('/') ? `.${path}` : path;
+  const response = await fetch(target, { ...options, headers: { ...(options.body ? { 'Content-Type':'application/json', 'X-CSRF-Token':state.csrf } : {}), ...options.headers } });
   const data = await response.json();
   if (!response.ok) { const e = new Error(data.error || 'Request failed.'); e.status = response.status; throw e; }
   return data;
@@ -240,7 +241,7 @@ async function loadWeeklyAdmin() {
   <section class="admin-card"><h2>Weekly settings</h2><form id="weekly-settings-form"><label>Schedule starts<input name="start_date" type="date" value="${data.settings.start_date}" required></label><label>Future weekly quota<input name="default_quota" type="number" min="1" max="1000" value="${data.settings.default_quota}" required></label><label class="check-label"><input name="paused" type="checkbox" ${data.settings.paused ? 'checked' : ''}> Pause new weekly releases</label><p class="muted small">Existing assignments and unfinished work are never changed.</p><button class="primary" type="submit">Save settings</button></form></section>
   <section class="admin-card"><h2>Academic breaks</h2><div class="break-list">${data.breaks.map(item=>`<div><span><strong>${esc(item.label)}</strong><small>${humanDate(item.start_date)}–${humanDate(item.end_date)}</small></span><button class="quiet" data-remove-break="${item.id}">Remove</button></div>`).join('')}</div><form id="weekly-break-form" class="break-form"><label>Label<input name="label" required></label><label>Start<input name="start_date" type="date" required></label><label>End<input name="end_date" type="date" required></label><button class="secondary" type="submit">Add break</button></form></section>
   <section class="admin-card"><h2>Review and reassign</h2><button id="weekly-review-flagged" class="secondary" ${data.settings.weekly_batch_id ? '' : 'disabled'}>Review flagged responses</button><form id="weekly-reassign-form"><label>Response ID<input name="response_id" required placeholder="Stable response ID"></label><label>Assign to<select name="target_user_id">${data.ra_progress.map(ra=>`<option value="${ra.id}">${esc(ra.name)}</option>`).join('')}</select></label><p class="muted small">Only unstarted responses can be reassigned.</p><button class="secondary" type="submit" ${data.settings.weekly_batch_id ? '' : 'disabled'}>Reassign response</button></form></section>
-  <section class="admin-card"><h2>Exports and audit</h2><p><a href="/api/export?kind=current-coding">Current coding CSV</a></p><p><a href="/api/export?kind=historical-coding">Historical coding CSV</a></p><p><a href="/api/export?kind=history">Complete revision history</a></p></section></div>`;
+  <section class="admin-card"><h2>Exports and audit</h2><p><a href="./api/export?kind=current-coding">Current coding CSV</a></p><p><a href="./api/export?kind=historical-coding">Historical coding CSV</a></p><p><a href="./api/export?kind=history">Complete revision history</a></p></section></div>`;
 }
 async function loadMigrationPreview(sourceBatch = '') {
   const preview = await api('/api/weekly/migration-preview' + (sourceBatch ? `?source_batch=${sourceBatch}` : ''));
